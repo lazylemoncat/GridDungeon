@@ -1,0 +1,31 @@
+[gd_scene load_steps=9 format=3 uid="uid://btc3x7wk0smsy"]
+
+[ext_resource type="Script" uid="uid://cjme1vk260y2h" path="res://scripts/main.gd" id="1_main"]
+[ext_resource type="PackedScene" path="res://scenes/player.tscn" id="2_player"]
+[ext_resource type="PackedScene" path="res://scenes/stairs.tscn" id="3_stairs"]
+[ext_resource type="PackedScene" uid="uid://c6f1rwaxogsa0" path="res://scenes/ui/hud.tscn" id="4_hud"]
+[ext_resource type="PackedScene" path="res://scenes/wall.tscn" id="5_wall"]
+[ext_resource type="PackedScene" path="res://scenes/door.tscn" id="6_door"]
+[ext_resource type="PackedScene" path="res://scenes/key.tscn" id="7_key"]
+[ext_resource type="PackedScene" path="res://scenes/portal.tscn" id="8_portal"]
+
+[node name="Main" type="Node2D"]
+script = ExtResource("1_main")
+wall_scene = ExtResource("5_wall")
+door_scene = ExtResource("6_door")
+key_scene = ExtResource("7_key")
+portal_scene = ExtResource("8_portal")
+
+[node name="Walls" type="Node2D" parent="."]
+
+[node name="Doors" type="Node2D" parent="."]
+
+[node name="Keys" type="Node2D" parent="."]
+
+[node name="Portals" type="Node2D" parent="."]
+
+[node name="Player" parent="." instance=ExtResource("2_player")]
+
+[node name="Stairs" parent="." instance=ExtResource("3_stairs")]
+
+[node name="HUD" parent="." instance=ExtResource("4_hud")]
