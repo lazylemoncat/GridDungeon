@@ -1,5 +1,10 @@
 extends Node2D
 
+const MobileControlsScript := preload("res://scripts/ui/mobile_controls.gd")
+const RailScript := preload("res://scripts/rail.gd")
+const RailLeverScript := preload("res://scripts/rail_lever.gd")
+
+@export var show_mobile_controls := true
 @export var wall_scene: PackedScene
 @export var door_scene: PackedScene
 @export var key_scene: PackedScene
@@ -23,6 +28,10 @@ var wall_cells: Array[Vector2i] = []
 var key_cells := {}
 var door_cells := {}
 var portal_cells := {}
+var rail_cells := {}
+var rail_lever_cells := {}
+var rail_states := {}
+var rail_blocked_cells := {}
 var floor_cells: Array[Vector2i] = []
 
 var has_active_floor := false
@@ -39,9 +48,17 @@ var loading_frames: Array[String] = ["◜", "◠", "◝", "◞", "◡", "◟"]
 var loading_frame_index := 0
 var loading_frame_elapsed := 0.0
 
+var mobile_controls
+var rails: Node2D
+var rail_lever_nodes: Node2D
+
 
 func _ready() -> void:
 	randomize()
+	_ensure_movement_containers()
+	player.z_index = 10
+	get_viewport().size_changed.connect(_on_viewport_size_changed)
+	_create_mobile_controls()
 	_create_loading_overlay()
 	_begin_generate_floor(1)
 
@@ -76,12 +93,55 @@ func _exit_tree() -> void:
 		generation_thread.wait_to_finish()
 
 
+func _on_viewport_size_changed() -> void:
+	_update_board_layout()
+	_refresh_existing_floor_layout()
+	queue_redraw()
+
+
+func _update_board_layout() -> void:
+	var reserved_bottom := 0.0
+
+	if mobile_controls != null and mobile_controls.has_method("get_reserved_bottom_height"):
+		reserved_bottom = float(mobile_controls.get_reserved_bottom_height())
+
+	GameConfig.update_board_layout(get_viewport_rect().size, grid_size, reserved_bottom)
+
+
+func _refresh_existing_floor_layout() -> void:
+	if not has_active_floor:
+		return
+
+	if player != null and player.has_method("refresh_layout"):
+		player.refresh_layout()
+
+	if stairs != null and stairs.has_method("refresh_layout"):
+		stairs.refresh_layout()
+
+	_refresh_container_layout(walls)
+	_refresh_container_layout(doors)
+	_refresh_container_layout(keys)
+	_refresh_container_layout(portals)
+	_refresh_container_layout(rails)
+	_refresh_container_layout(rail_lever_nodes)
+
+
+func _refresh_container_layout(container: Node) -> void:
+	if container == null:
+		return
+
+	for child in container.get_children():
+		if child.has_method("refresh_layout"):
+			child.refresh_layout()
+
+
 func _begin_generate_floor(floor_number: int) -> void:
 	if is_generating_floor:
 		return
 
 	pending_floor_number = floor_number
 	is_generating_floor = true
+	_set_mobile_controls_enabled(false)
 	_show_loading_overlay("正在生成第 %d 层..." % floor_number)
 
 	generation_thread = Thread.new()
@@ -97,10 +157,10 @@ func _begin_generate_floor(floor_number: int) -> void:
 
 func _generate_floor_thread(floor_number: int) -> Dictionary:
 	var worker_generator := LevelGenerator.new()
-	var worker_difficulty_selector := LevelDifficultySelector.new()
+	var worker_request_selector := LevelRequestSelector.new()
 
-	for attempt_index in range(LevelDifficultySelector.GENERATION_RETRY_COUNT):
-		var request: Dictionary = worker_difficulty_selector.pick_level_request(floor_number)
+	for attempt_index in range(LevelRequestSelector.GENERATION_RETRY_COUNT):
+		var request: Dictionary = worker_request_selector.pick_level_request(floor_number)
 		var level: Dictionary = worker_generator.generate(
 			int(request["grid_size"]),
 			-1,
@@ -119,7 +179,7 @@ func _generate_floor_thread(floor_number: int) -> Dictionary:
 		"success": false,
 		"floor_number": floor_number,
 		"level": {},
-		"attempts": LevelDifficultySelector.GENERATION_RETRY_COUNT
+		"attempts": LevelRequestSelector.GENERATION_RETRY_COUNT
 	}
 
 
@@ -140,17 +200,20 @@ func _finish_generation_result(result: Dictionary) -> void:
 	if bool(result.get("success", false)):
 		_apply_generated_floor(int(result["floor_number"]), result["level"])
 		_hide_loading_overlay()
+		_set_mobile_controls_enabled(true)
 		block_floor_advance_until_player_leaves_exit = false
 		return
 
 	_hide_loading_overlay()
 
 	if has_active_floor:
+		_set_mobile_controls_enabled(true)
 		block_floor_advance_until_player_leaves_exit = true
 		push_warning("下一层生成失败，保留当前层。")
 		_update_hud()
 		return
 
+	_set_mobile_controls_enabled(false)
 	push_error("初始楼层生成失败。请降低难度参数或增加生成尝试次数。")
 
 
@@ -163,7 +226,13 @@ func _apply_generated_floor(floor_number: int, level: Dictionary) -> void:
 	key_cells = level["keys"]
 	door_cells = level["doors"]
 	portal_cells = level["portals"]
+	rail_cells = level.get("rails", {})
+	rail_lever_cells = level.get("rail_levers", {})
+	rail_states = _make_initial_rail_states(rail_cells)
+	rail_blocked_cells = _make_rail_blocked_cells(rail_cells)
 	optimal_steps = int(level["optimal_steps"])
+
+	_update_board_layout()
 
 	player.set_cell(level["start"])
 	player.clear_keys()
@@ -189,6 +258,9 @@ func _try_move_player(direction: Vector2i) -> void:
 	if wall_cells.has(next_cell):
 		return
 
+	if rail_blocked_cells.has(next_cell):
+		return
+
 	if door_cells.has(next_cell):
 		var door_color: String = door_cells[next_cell]
 
@@ -199,7 +271,9 @@ func _try_move_player(direction: Vector2i) -> void:
 		_open_door(next_cell)
 
 	player.set_cell(next_cell)
+	_try_activate_rail_lever()
 	_try_use_portal()
+	_try_use_rail()
 	total_moves += 1
 	floor_moves += 1
 
@@ -238,16 +312,18 @@ func _draw() -> void:
 
 
 func _draw_grid() -> void:
+	var size := float(GameConfig.cell_size)
+
 	for cell in floor_cells:
 		var cell_pos := _cell_to_world(cell)
-		var rect := Rect2(cell_pos, Vector2(GameConfig.CELL_SIZE, GameConfig.CELL_SIZE))
+		var rect := Rect2(cell_pos, Vector2(size, size))
 
 		draw_rect(rect, Color(0.18, 0.18, 0.20), true)
-		draw_rect(rect, Color(0.65, 0.65, 0.70), false, 2.0)
+		draw_rect(rect, Color(0.65, 0.65, 0.70), false, maxf(1.0, size * 0.035))
 
 
 func _cell_to_world(cell: Vector2i) -> Vector2:
-	return GameConfig.BOARD_OFFSET + Vector2(cell.x * GameConfig.CELL_SIZE, cell.y * GameConfig.CELL_SIZE)
+	return GameConfig.cell_to_world(cell)
 
 
 func _spawn_floor_entities() -> void:
@@ -274,9 +350,11 @@ func _spawn_floor_entities() -> void:
 		portal.set_color_name(portal_cells[portal_cell])
 		portal.set_cell(portal_cell)
 
+	_spawn_rail_entities()
+
 
 func _clear_floor_entities() -> void:
-	for container in [walls, doors, keys, portals]:
+	for container in [walls, doors, keys, portals, rails, rail_lever_nodes]:
 		for child in container.get_children():
 			child.queue_free()
 
@@ -294,6 +372,222 @@ func _try_use_portal() -> void:
 		if portal_cells[portal_cell] == portal_color:
 			player.set_cell(portal_cell)
 			return
+
+
+func _try_activate_rail_lever() -> void:
+	if not rail_lever_cells.has(player.cell):
+		return
+
+	var lever_data: Dictionary = rail_lever_cells[player.cell]
+	var target_rail_id: String = str(lever_data.get("target", ""))
+
+	if target_rail_id == "" or not rail_states.has(target_rail_id):
+		return
+
+	_advance_rail_state(target_rail_id)
+	_refresh_rail_visuals()
+
+
+func _try_use_rail() -> void:
+	var port_info: Dictionary = _get_rail_port_info(player.cell)
+
+	if port_info.is_empty():
+		return
+
+	var rail_id: String = str(port_info["rail_id"])
+	var port_index: int = int(port_info["port_index"])
+
+	if not rail_cells.has(rail_id):
+		return
+
+	var rail_data: Dictionary = rail_cells[rail_id]
+	var ports: Array[Vector2i] = _get_rail_ports(rail_data)
+	var connections: Array = _get_rail_connections(rail_data, ports.size())
+
+	if ports.size() < 2 or connections.is_empty():
+		return
+
+	var state: int = wrapi(int(rail_states.get(rail_id, int(rail_data.get("state", 0)))), 0, connections.size())
+	var connection: Array = connections[state]
+
+	if connection.size() < 2:
+		return
+
+	var a: int = int(connection[0])
+	var b: int = int(connection[1])
+
+	if a < 0 or a >= ports.size() or b < 0 or b >= ports.size():
+		return
+
+	if port_index == a:
+		player.set_cell(ports[b])
+		return
+
+	if port_index == b:
+		player.set_cell(ports[a])
+		return
+
+
+func _get_rail_port_info(cell: Vector2i) -> Dictionary:
+	for rail_id in rail_cells.keys():
+		var rail_data: Dictionary = rail_cells[rail_id]
+		var ports: Array[Vector2i] = _get_rail_ports(rail_data)
+
+		for port_index in range(ports.size()):
+			if ports[port_index] == cell:
+				return {
+					"rail_id": str(rail_id),
+					"port_index": port_index
+				}
+
+	return {}
+
+
+func _get_rail_ports(rail_data: Dictionary) -> Array[Vector2i]:
+	var result: Array[Vector2i] = []
+	var raw_ports: Array = rail_data.get("ports", [])
+
+	for port in raw_ports:
+		if port is Vector2i:
+			result.append(port)
+
+	return result
+
+
+func _get_rail_paths(rail_data: Dictionary) -> Array:
+	var result: Array = []
+	var raw_paths: Array = rail_data.get("paths", [])
+
+	for raw_path in raw_paths:
+		if not (raw_path is Array):
+			continue
+
+		var path: Array[Vector2i] = []
+
+		for cell in raw_path:
+			if cell is Vector2i:
+				path.append(cell)
+
+		if path.size() >= 2:
+			result.append(path)
+
+	return result
+
+
+func _get_rail_connections(rail_data: Dictionary, port_count: int) -> Array:
+	var result: Array = []
+	var raw_connections: Array = rail_data.get("connections", [])
+
+	for raw_connection in raw_connections:
+		if not (raw_connection is Array):
+			continue
+
+		var connection: Array = raw_connection as Array
+
+		if connection.size() < 2:
+			continue
+
+		var a: int = int(connection[0])
+		var b: int = int(connection[1])
+
+		if a == b:
+			continue
+
+		if a < 0 or a >= port_count or b < 0 or b >= port_count:
+			continue
+
+		result.append([a, b])
+
+	if result.is_empty() and port_count >= 2:
+		for i in range(port_count):
+			result.append([i, (i + 1) % port_count])
+
+	return result
+
+
+func _make_rail_blocked_cells(rails_data: Dictionary) -> Dictionary:
+	var result := {}
+
+	for rail_id in rails_data.keys():
+		var rail_data: Dictionary = rails_data[rail_id]
+		var paths: Array = _get_rail_paths(rail_data)
+
+		for path in paths:
+			for path_index in range(1, path.size() - 1):
+				result[path[path_index]] = true
+
+	return result
+
+
+func _advance_rail_state(rail_id: String) -> void:
+	if not rail_cells.has(rail_id):
+		return
+
+	var rail_data: Dictionary = rail_cells[rail_id]
+	var ports: Array[Vector2i] = _get_rail_ports(rail_data)
+	var connections: Array = _get_rail_connections(rail_data, ports.size())
+
+	if connections.is_empty():
+		return
+
+	rail_states[rail_id] = (int(rail_states.get(rail_id, int(rail_data.get("state", 0)))) + 1) % connections.size()
+
+
+func _make_initial_rail_states(rails_data: Dictionary) -> Dictionary:
+	var result := {}
+
+	for rail_id in rails_data.keys():
+		var rail_data: Dictionary = rails_data[rail_id]
+		var ports: Array[Vector2i] = _get_rail_ports(rail_data)
+		var connections: Array = _get_rail_connections(rail_data, ports.size())
+		var state: int = int(rail_data.get("state", 0))
+
+		if not connections.is_empty():
+			state = wrapi(state, 0, connections.size())
+
+		result[str(rail_id)] = state
+
+	return result
+
+
+func _spawn_rail_entities() -> void:
+	if rails == null or rail_lever_nodes == null:
+		return
+
+	for rail_id in rail_cells.keys():
+		var rail_data: Dictionary = rail_cells[rail_id]
+		var ports: Array[Vector2i] = _get_rail_ports(rail_data)
+		var paths: Array = _get_rail_paths(rail_data)
+		var connections: Array = _get_rail_connections(rail_data, ports.size())
+		var state: int = int(rail_states.get(str(rail_id), int(rail_data.get("state", 0))))
+		var color_name: String = str(rail_data.get("color", "cyan"))
+		var rail = RailScript.new()
+		rails.add_child(rail)
+		rail.set_rail_data(str(rail_id), ports, connections, state, color_name, paths)
+
+	for lever_cell in rail_lever_cells.keys():
+		var lever_data: Dictionary = rail_lever_cells[lever_cell]
+		var target_rail_id: String = str(lever_data.get("target", ""))
+		var state: int = int(rail_states.get(target_rail_id, 0))
+		var lever = RailLeverScript.new()
+		rail_lever_nodes.add_child(lever)
+		lever.set_target_rail_id(target_rail_id)
+		lever.set_state(state)
+		lever.set_cell(lever_cell)
+
+
+func _refresh_rail_visuals() -> void:
+	if rails != null:
+		for rail in rails.get_children():
+			if rail.has_method("set_state"):
+				var rail_id: String = str(rail.rail_id)
+				rail.set_state(int(rail_states.get(rail_id, 0)))
+
+	if rail_lever_nodes != null:
+		for lever in rail_lever_nodes.get_children():
+			if lever.has_method("set_state"):
+				var target_rail_id: String = str(lever.target_rail_id)
+				lever.set_state(int(rail_states.get(target_rail_id, 0)))
 
 
 func _try_pick_up_key() -> void:
@@ -317,6 +611,50 @@ func _open_door(cell: Vector2i) -> void:
 		if door.cell == cell:
 			door.queue_free()
 			break
+
+
+func move_player_from_ui(direction: Vector2i) -> void:
+	_try_move_player(direction)
+
+
+func _ensure_movement_containers() -> void:
+	var existing_rails := get_node_or_null("Rails")
+
+	if existing_rails is Node2D:
+		rails = existing_rails as Node2D
+	else:
+		rails = Node2D.new()
+		rails.name = "Rails"
+		add_child(rails)
+
+	rails.z_index = 1
+
+	var existing_rail_levers := get_node_or_null("RailLevers")
+
+	if existing_rail_levers is Node2D:
+		rail_lever_nodes = existing_rail_levers as Node2D
+	else:
+		rail_lever_nodes = Node2D.new()
+		rail_lever_nodes.name = "RailLevers"
+		add_child(rail_lever_nodes)
+
+	rail_lever_nodes.z_index = 2
+
+
+func _create_mobile_controls() -> void:
+	mobile_controls = MobileControlsScript.new()
+	mobile_controls.visible = show_mobile_controls
+	mobile_controls.move_requested.connect(move_player_from_ui)
+	add_child(mobile_controls)
+	mobile_controls.set_input_enabled(false)
+
+
+func _set_mobile_controls_enabled(enabled: bool) -> void:
+	if mobile_controls == null:
+		return
+
+	if mobile_controls.has_method("set_input_enabled"):
+		mobile_controls.set_input_enabled(enabled)
 
 
 func _create_loading_overlay() -> void:

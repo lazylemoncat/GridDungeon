@@ -41,6 +41,17 @@ const DEFAULT_GENERATION_PROFILE := {
 	"required_gate_max": 3,
 	"target_min_steps": 0,
 	"target_max_steps": 999999,
+
+	# Hard difficulty gates. A generated level must pass these solver-backed checks.
+	"min_solver_state_count": 0,
+	"min_main_path_length": 0,
+	"min_required_branch_key_count": 0,
+	"min_required_key_dead_end_count": 0,
+	"min_required_key_distance_from_main": 1,
+	"min_backtrack_steps": 0,
+	"min_decision_branch_count": 0,
+	"require_required_keys_in_branches": false,
+
 	"require_unique_optimal_solution": true,
 	"solution_policy": "unique_optimal",
 	"decoy_door_extra_max": 2,
@@ -48,6 +59,13 @@ const DEFAULT_GENERATION_PROFILE := {
 	"loose_key_max": 3,
 	"portal_pair_min": 1,
 	"portal_pair_max": 2,
+	"rail_min": 1,
+	"rail_max": 1,
+	"rail_port_min": 3,
+	"rail_port_max": 5,
+	"rail_min_length": 4,
+	"rail_lever_min": 1,
+	"rail_lever_max": 0,
 	"return_failure_report": false,
 	"future_bomb_enabled": false,
 	"future_rail_enabled": false
@@ -91,6 +109,13 @@ class SolverContext:
 	var door_cell_to_index: Dictionary = {}
 	var door_cell_to_color: Dictionary = {}
 	var portal_links: Dictionary = {}
+	var rail_ids: Array[String] = []
+	var rail_id_to_index: Dictionary = {}
+	var rail_data_by_index: Array[Dictionary] = []
+	var rail_cell_to_port: Dictionary = {}
+	var rail_blocked_cells: Dictionary = {}
+	var rail_lever_cell_to_rail_index: Dictionary = {}
+	var rail_initial_state_key: String = ""
 	var rules: Array = []
 
 
@@ -175,6 +200,120 @@ class PortalMechanicRule:
 		return cell
 
 
+class RailLeverMechanicRule:
+	func can_enter(_context, _from_cell: Vector2i, _to_cell: Vector2i, _state) -> bool:
+		return true
+
+	func on_enter(context, cell: Vector2i, state) -> void:
+		if not context.rail_lever_cell_to_rail_index.has(cell):
+			return
+
+		var rail_index: int = int(context.rail_lever_cell_to_rail_index[cell])
+
+		if rail_index < 0 or rail_index >= context.rail_data_by_index.size():
+			return
+
+		var rail_data: Dictionary = context.rail_data_by_index[rail_index]
+		var connections: Array = rail_data.get("connections", [])
+
+		if connections.is_empty():
+			return
+
+		var rail_state_key: String = str(state.extra.get("rail_state_key", context.rail_initial_state_key))
+		var rail_states: Array[int] = _decode_rail_state_key(rail_state_key, context.rail_data_by_index.size())
+		rail_states[rail_index] = (rail_states[rail_index] + 1) % connections.size()
+		state.extra["rail_state_key"] = _encode_rail_state_array(rail_states)
+
+	func after_enter(_context, cell: Vector2i, _state) -> Vector2i:
+		return cell
+
+	func _decode_rail_state_key(value: String, expected_size: int) -> Array[int]:
+		var result: Array[int] = []
+		result.resize(expected_size)
+		result.fill(0)
+
+		if value == "":
+			return result
+
+		var parts := value.split(",", false)
+
+		for i in range(mini(parts.size(), expected_size)):
+			result[i] = int(parts[i])
+
+		return result
+
+	func _encode_rail_state_array(values: Array[int]) -> String:
+		var parts: Array[String] = []
+
+		for value in values:
+			parts.append(str(value))
+
+		return ",".join(parts)
+
+
+class RailMechanicRule:
+	func can_enter(context, _from_cell: Vector2i, to_cell: Vector2i, _state) -> bool:
+		return not context.rail_blocked_cells.has(to_cell)
+
+	func on_enter(_context, _cell: Vector2i, _state) -> void:
+		pass
+
+	func after_enter(context, cell: Vector2i, state) -> Vector2i:
+		if not context.rail_cell_to_port.has(cell):
+			return cell
+
+		var port_info: Dictionary = context.rail_cell_to_port[cell]
+		var rail_index: int = int(port_info["rail_index"])
+		var port_index: int = int(port_info["port_index"])
+
+		if rail_index < 0 or rail_index >= context.rail_data_by_index.size():
+			return cell
+
+		var rail_data: Dictionary = context.rail_data_by_index[rail_index]
+		var ports: Array[Vector2i] = rail_data["ports"]
+		var connections: Array = rail_data.get("connections", [])
+
+		if ports.size() < 2 or connections.is_empty():
+			return cell
+
+		var rail_state_key: String = str(state.extra.get("rail_state_key", context.rail_initial_state_key))
+		var rail_states: Array[int] = _decode_rail_state_key(rail_state_key, context.rail_data_by_index.size())
+		var active_state: int = wrapi(rail_states[rail_index], 0, connections.size())
+		var connection: Array = connections[active_state]
+
+		if connection.size() < 2:
+			return cell
+
+		var a: int = int(connection[0])
+		var b: int = int(connection[1])
+
+		if a < 0 or a >= ports.size() or b < 0 or b >= ports.size():
+			return cell
+
+		if port_index == a:
+			return ports[b]
+
+		if port_index == b:
+			return ports[a]
+
+		return cell
+
+	func _decode_rail_state_key(value: String, expected_size: int) -> Array[int]:
+		var result: Array[int] = []
+		result.resize(expected_size)
+		result.fill(0)
+
+		if value == "":
+			return result
+
+		var parts := value.split(",", false)
+
+		for i in range(mini(parts.size(), expected_size)):
+			result[i] = int(parts[i])
+
+		return result
+
+
 func generate(grid_size: int, seed: int = -1, profile: Dictionary = {}) -> Dictionary:
 	if seed >= 0:
 		rng.seed = seed
@@ -203,21 +342,26 @@ func generate(grid_size: int, seed: int = -1, profile: Dictionary = {}) -> Dicti
 			_record_fail(fail_reasons, "not_unique_optimal_solution")
 			continue
 
-		if not _matches_difficulty_target(solved, generation_profile):
-			_record_fail(fail_reasons, "difficulty_target_mismatch")
+		var difficulty_fail_reason := _get_difficulty_fail_reason(level, solved, generation_profile)
+
+		if difficulty_fail_reason != "":
+			_record_fail(fail_reasons, difficulty_fail_reason)
 			continue
 
 		var solved_with_path := solve_level(level, false, true)
+		var difficulty_metrics := _build_difficulty_metrics(level, solved_with_path)
 
 		level["optimal_steps"] = solved_with_path["steps"]
 		level["optimal_path"] = solved_with_path["path"]
 		level["optimal_solution_count"] = solved_with_path["optimal_solution_count"]
 		level["solution_count"] = solved_with_path["optimal_solution_count"] # Legacy alias.
+		level["difficulty_metrics"] = difficulty_metrics
 		level["generation_debug"] = {
 			"attempt": attempt + 1,
 			"fail_reasons": fail_reasons.duplicate(),
 			"solution_policy": generation_profile["solution_policy"],
 			"profile": generation_profile.duplicate(),
+			"difficulty_metrics": difficulty_metrics,
 			"solver_state_count": solved_with_path.get("state_count", 0),
 			"solver_max_queue_size": solved_with_path.get("max_queue_size", 0)
 		}
@@ -271,6 +415,10 @@ func _try_generate(
 	var exit_cell := _farthest_leaf(start_cell, adjacency)
 	var main_path := _find_path(start_cell, exit_cell, adjacency)
 
+	if main_path.size() < int(generation_profile.get("min_main_path_length", 0)):
+		_record_fail(fail_reasons, "main_path_below_difficulty_target")
+		return {}
+
 	var spacing := int(generation_profile["main_path_door_spacing"])
 	var required_gate_count := _choose_required_gate_count(main_path.size(), door_count_by_leaves, generation_profile)
 
@@ -292,8 +440,12 @@ func _try_generate(
 	var doors := {}
 	var keys := {}
 	var portals := {}
+	var rails := {}
+	var rail_levers := {}
 	var used_colors := {}
 	var required_colors := _make_door_color_sequence(required_gate_count)
+	var required_door_cells: Array[Vector2i] = []
+	var required_key_cells: Array[Vector2i] = []
 
 	for i in range(required_gate_count):
 		var door_index: int = door_indices[i]
@@ -303,6 +455,7 @@ func _try_generate(
 		doors[door_cell] = color_name
 		occupied[door_cell] = true
 		used_colors[color_name] = true
+		required_door_cells.append(door_cell)
 
 	var previous_door_index := 0
 
@@ -310,7 +463,16 @@ func _try_generate(
 		var door_index: int = door_indices[i]
 		var color_name: String = required_colors[i]
 		var zone_cells := _collect_zone_cells(main_path, adjacency, previous_door_index, door_index - 1, path_set)
-		var key_cell := _choose_key_cell(zone_cells, adjacency, path_set, occupied, start_cell, exit_cell, doors)
+		var key_cell := _choose_key_cell(
+			zone_cells,
+			adjacency,
+			path_set,
+			occupied,
+			start_cell,
+			exit_cell,
+			doors,
+			generation_profile
+		)
 
 		if key_cell == INVALID_CELL:
 			_record_fail(fail_reasons, "key_place_failed")
@@ -318,6 +480,7 @@ func _try_generate(
 
 		keys[key_cell] = color_name
 		occupied[key_cell] = true
+		required_key_cells.append(key_cell)
 		previous_door_index = door_index
 
 	_add_decoy_mechanics(
@@ -334,6 +497,29 @@ func _try_generate(
 		required_gate_count,
 		generation_profile
 	)
+
+	if _count_portal_pairs(portals) < int(generation_profile["portal_pair_min"]):
+		_record_fail(fail_reasons, "portal_place_failed")
+		return {}
+
+	_add_rail_mechanics(
+		grid_size,
+		floor_cells,
+		occupied,
+		rails,
+		rail_levers,
+		start_cell,
+		exit_cell,
+		generation_profile
+	)
+
+	if rails.size() < int(generation_profile["rail_min"]):
+		_record_fail(fail_reasons, "rail_place_failed")
+		return {}
+
+	if rail_levers.size() < int(generation_profile["rail_lever_min"]):
+		_record_fail(fail_reasons, "rail_lever_place_failed")
+		return {}
 
 	var wall_cells: Array[Vector2i] = []
 
@@ -353,9 +539,13 @@ func _try_generate(
 		keys,
 		doors,
 		portals,
+		rails,
+		rail_levers,
 		used_colors,
 		main_path,
 		door_indices,
+		required_key_cells,
+		required_door_cells,
 		generation_profile
 	)
 
@@ -380,6 +570,9 @@ func solve_level(level: Dictionary, stop_after_multiple_optimal := false, store_
 	start_key_counts.fill(0)
 
 	var start_state := SolverState.new(start_cell, start_key_counts)
+
+	if context.rail_data_by_index.size() > 0:
+		start_state.extra["rail_state_key"] = context.rail_initial_state_key
 
 	# Preserve the original behavior: the start cell can grant an item, but start-cell portal
 	# movement is not automatically applied unless the player moves onto a portal later.
@@ -527,6 +720,8 @@ func _build_solver_context(level: Dictionary):
 	var keys := _get_key_map(level)
 	var doors := _get_door_map(level)
 	var portals := _get_portal_map(level)
+	var rails := _get_rail_map(level)
+	var rail_levers := _get_rail_lever_map(level)
 
 	if level.has("key_colors"):
 		context.key_colors = _normalize_color_array(level["key_colors"])
@@ -565,11 +760,74 @@ func _build_solver_context(level: Dictionary):
 	else:
 		context.portal_links = _build_portal_links(portals)
 
-	# Rule order preserves current behavior: door cost -> key pickup -> portal movement.
+	var rail_ids: Array[String] = []
+
+	for rail_id in rails.keys():
+		rail_ids.append(str(rail_id))
+
+	rail_ids.sort()
+
+	if rail_ids.size() > MAX_BITMASK_ENTITY_COUNT:
+		push_error("轨道数量超过求解器上限：%d" % [rail_ids.size()])
+		return null
+
+	var initial_rail_states: Array[int] = []
+
+	for rail_id in rail_ids:
+		var raw_rail_data: Dictionary = rails[rail_id]
+		var ports: Array[Vector2i] = _normalize_rail_ports(raw_rail_data.get("ports", []))
+		var paths: Array = _normalize_rail_paths(raw_rail_data.get("paths", []))
+
+		if ports.size() < 2:
+			continue
+
+		var connections: Array = _normalize_rail_connections(raw_rail_data.get("connections", []), ports.size())
+
+		if connections.is_empty():
+			connections = _make_clockwise_rail_connections(ports.size())
+
+		if connections.is_empty():
+			continue
+
+		var rail_index: int = context.rail_data_by_index.size()
+		var rail_data: Dictionary = raw_rail_data.duplicate(true)
+		var initial_state: int = wrapi(int(rail_data.get("state", 0)), 0, connections.size())
+		rail_data["id"] = rail_id
+		rail_data["ports"] = ports
+		rail_data["paths"] = paths
+		rail_data["connections"] = connections
+		rail_data["state"] = initial_state
+		context.rail_id_to_index[rail_id] = rail_index
+		context.rail_ids.append(rail_id)
+		context.rail_data_by_index.append(rail_data)
+		initial_rail_states.append(initial_state)
+
+		for port_index in range(ports.size()):
+			context.rail_cell_to_port[ports[port_index]] = {
+				"rail_index": rail_index,
+				"port_index": port_index
+			}
+
+		for path in paths:
+			for path_index in range(1, path.size() - 1):
+				context.rail_blocked_cells[path[path_index]] = true
+
+	context.rail_initial_state_key = _encode_rail_state_array(initial_rail_states)
+
+	for lever_cell in rail_levers.keys():
+		var lever_data: Dictionary = rail_levers[lever_cell]
+		var target_rail_id: String = str(lever_data.get("target", ""))
+
+		if context.rail_id_to_index.has(target_rail_id):
+			context.rail_lever_cell_to_rail_index[lever_cell] = int(context.rail_id_to_index[target_rail_id])
+
+	# Rule order: door cost -> pickup -> switch state -> portal movement -> rail movement.
 	context.rules = [
 		DoorMechanicRule.new(),
 		KeyMechanicRule.new(),
-		PortalMechanicRule.new()
+		RailLeverMechanicRule.new(),
+		PortalMechanicRule.new(),
+		RailMechanicRule.new()
 	]
 
 	return context
@@ -584,9 +842,13 @@ func _build_level_data(
 	keys: Dictionary,
 	doors: Dictionary,
 	portals: Dictionary,
+	rails: Dictionary,
+	rail_levers: Dictionary,
 	used_colors: Dictionary,
 	main_path: Array,
 	door_indices: Array,
+	required_key_cells: Array[Vector2i],
+	required_door_cells: Array[Vector2i],
 	generation_profile: Dictionary
 ) -> Dictionary:
 	var key_colors := _sort_colors_by_config(_collect_used_colors(keys, doors))
@@ -614,8 +876,8 @@ func _build_level_data(
 			"future_bombs": {}
 		},
 		LAYER_MOVEMENT: {
-			"future_rails": {},
-			"future_rail_levers": {}
+			"rails": rails,
+			"rail_levers": rail_levers
 		},
 		LAYER_SPECIAL: {
 			"portals": portals
@@ -627,14 +889,16 @@ func _build_level_data(
 		"terrain": terrain,
 		"markers": markers,
 		"layers": layers,
-		"entities": _build_entities(keys, doors, portals),
-		"mechanic_schema_version": 2,
-		"mechanic_rules": [ENTITY_DOOR, ENTITY_KEY, ENTITY_PORTAL],
+		"entities": _build_entities(keys, doors, portals, rails, rail_levers),
+		"mechanic_schema_version": 4,
+		"mechanic_rules": [ENTITY_DOOR, ENTITY_KEY, ENTITY_PORTAL, ENTITY_RAIL, ENTITY_RAIL_LEVER],
 		"generation_profile": generation_profile.duplicate(),
 		"portal_links": portal_links,
 		"key_colors": key_colors,
 		"main_path": main_path,
 		"door_indices": door_indices,
+		"required_key_cells": required_key_cells,
+		"required_door_cells": required_door_cells,
 		"required_gate_count": door_indices.size(),
 		"optimal_steps": -1,
 		"optimal_path": [],
@@ -648,18 +912,30 @@ func _build_level_data(
 		"exit": exit_cell,
 		"keys": keys,
 		"doors": doors,
-		"portals": portals
+		"portals": portals,
+		"rails": rails,
+		"rail_levers": rail_levers
 	}
 
 
-func _build_entities(keys: Dictionary, doors: Dictionary, portals: Dictionary) -> Array[Dictionary]:
+func _build_entities(
+	keys: Dictionary,
+	doors: Dictionary,
+	portals: Dictionary,
+	rails: Dictionary,
+	rail_levers: Dictionary
+) -> Array[Dictionary]:
 	var result: Array[Dictionary] = []
 	var key_cells := keys.keys()
 	var door_cells := doors.keys()
 	var portal_cells := portals.keys()
+	var rail_ids := rails.keys()
+	var rail_lever_cells := rail_levers.keys()
 	_sort_vector2i_array(key_cells)
 	_sort_vector2i_array(door_cells)
 	_sort_vector2i_array(portal_cells)
+	rail_ids.sort()
+	_sort_vector2i_array(rail_lever_cells)
 
 	for cell in key_cells:
 		result.append({
@@ -685,6 +961,28 @@ func _build_entities(keys: Dictionary, doors: Dictionary, portals: Dictionary) -
 			"group": portals[cell]
 		})
 
+	for rail_id in rail_ids:
+		var rail_data: Dictionary = rails[rail_id]
+		result.append({
+			"type": ENTITY_RAIL,
+			"layer": LAYER_MOVEMENT,
+			"id": str(rail_id),
+			"ports": rail_data.get("ports", []),
+			"paths": rail_data.get("paths", []),
+			"connections": rail_data.get("connections", []),
+			"state": int(rail_data.get("state", 0)),
+			"color": str(rail_data.get("color", "cyan"))
+		})
+
+	for cell in rail_lever_cells:
+		var lever_data: Dictionary = rail_levers[cell]
+		result.append({
+			"type": ENTITY_RAIL_LEVER,
+			"layer": LAYER_MOVEMENT,
+			"cell": cell,
+			"target": str(lever_data.get("target", ""))
+		})
+
 	return result
 
 
@@ -695,12 +993,28 @@ func _make_generation_profile(grid_size: int, overrides: Dictionary) -> Dictiona
 		result[key] = overrides[key]
 
 	result["grid_size"] = clampi(grid_size, GameConfig.MIN_GRID_SIZE, GameConfig.MAX_GRID_SIZE)
+	result["max_generation_attempts"] = maxi(1, int(result.get("max_generation_attempts", 300)))
 	result["required_gate_min"] = maxi(1, int(result["required_gate_min"]))
 	result["required_gate_max"] = maxi(int(result["required_gate_min"]), int(result["required_gate_max"]))
 	result["main_path_door_spacing"] = maxi(1, int(result["main_path_door_spacing"]))
 	result["target_min_steps"] = maxi(0, int(result["target_min_steps"]))
 	result["target_max_steps"] = maxi(int(result["target_min_steps"]), int(result["target_max_steps"]))
 	result["min_floor_count"] = clampi(int(result["min_floor_count"]), 2, result["grid_size"] * result["grid_size"])
+	result["min_solver_state_count"] = maxi(0, int(result.get("min_solver_state_count", 0)))
+	result["min_main_path_length"] = maxi(0, int(result.get("min_main_path_length", 0)))
+	result["min_required_branch_key_count"] = maxi(0, int(result.get("min_required_branch_key_count", 0)))
+	result["min_required_key_dead_end_count"] = maxi(0, int(result.get("min_required_key_dead_end_count", 0)))
+	result["min_required_key_distance_from_main"] = maxi(0, int(result.get("min_required_key_distance_from_main", 1)))
+	result["min_backtrack_steps"] = maxi(0, int(result.get("min_backtrack_steps", 0)))
+	result["min_decision_branch_count"] = maxi(0, int(result.get("min_decision_branch_count", 0)))
+	result["require_required_keys_in_branches"] = bool(result.get("require_required_keys_in_branches", false))
+	result["rail_min"] = maxi(0, int(result.get("rail_min", 0)))
+	result["rail_max"] = maxi(int(result["rail_min"]), int(result.get("rail_max", 0)))
+	result["rail_port_min"] = maxi(3, int(result.get("rail_port_min", 3)))
+	result["rail_port_max"] = maxi(int(result["rail_port_min"]), int(result.get("rail_port_max", 5)))
+	result["rail_min_length"] = maxi(2, int(result.get("rail_min_length", 4)))
+	result["rail_lever_min"] = maxi(0, int(result.get("rail_lever_min", 0)))
+	result["rail_lever_max"] = maxi(int(result["rail_lever_min"]), int(result.get("rail_lever_max", 0)))
 
 	return result
 
@@ -754,24 +1068,47 @@ func _choose_key_cell(
 	occupied: Dictionary,
 	start_cell: Vector2i,
 	exit_cell: Vector2i,
-	doors: Dictionary
+	doors: Dictionary,
+	generation_profile: Dictionary
 ) -> Vector2i:
-	var dead_end_candidates: Array[Vector2i] = []
+	var strict_branch_required := bool(generation_profile.get("require_required_keys_in_branches", false))
+	var min_branch_depth := maxi(0, int(generation_profile.get("min_required_key_distance_from_main", 1)))
+	var deep_dead_end_candidates: Array[Vector2i] = []
+	var deep_branch_candidates: Array[Vector2i] = []
+	var shallow_dead_end_candidates: Array[Vector2i] = []
 	var fallback_candidates: Array[Vector2i] = []
 
 	for cell in zone_cells:
 		if occupied.has(cell) or cell == start_cell or cell == exit_cell or doors.has(cell):
 			continue
 
+		var distance_from_main := _distance_to_path(cell, path_set, adjacency)
+		var is_branch_cell: bool = distance_from_main > 0
+		var is_dead_end: bool = false
+
+		if adjacency.has(cell):
+			is_dead_end = adjacency[cell].size() == 1
+
+		if is_branch_cell and distance_from_main >= min_branch_depth:
+			if is_dead_end:
+				deep_dead_end_candidates.append(cell)
+			else:
+				deep_branch_candidates.append(cell)
+		elif is_branch_cell and is_dead_end:
+			shallow_dead_end_candidates.append(cell)
+
 		fallback_candidates.append(cell)
 
-		if not path_set.has(cell) and adjacency[cell].size() == 1:
-			dead_end_candidates.append(cell)
+	if not deep_dead_end_candidates.is_empty():
+		return deep_dead_end_candidates[rng.randi_range(0, deep_dead_end_candidates.size() - 1)]
 
-	if not dead_end_candidates.is_empty():
-		return dead_end_candidates[rng.randi_range(0, dead_end_candidates.size() - 1)]
+	if not deep_branch_candidates.is_empty():
+		return deep_branch_candidates[rng.randi_range(0, deep_branch_candidates.size() - 1)]
 
-	if not fallback_candidates.is_empty():
+	if not strict_branch_required and not shallow_dead_end_candidates.is_empty():
+		return shallow_dead_end_candidates[rng.randi_range(0, shallow_dead_end_candidates.size() - 1)]
+
+	if not strict_branch_required and not fallback_candidates.is_empty():
 		return fallback_candidates[rng.randi_range(0, fallback_candidates.size() - 1)]
 
 	return INVALID_CELL
@@ -873,6 +1210,277 @@ func _add_decoy_mechanics(
 		portals[second_cell] = color_name
 		occupied[second_cell] = true
 		portal_colors[color_name] = true
+
+
+func _add_rail_mechanics(
+	grid_size: int,
+	floor_cells: Array[Vector2i],
+	occupied: Dictionary,
+	rails: Dictionary,
+	rail_levers: Dictionary,
+	start_cell: Vector2i,
+	exit_cell: Vector2i,
+	generation_profile: Dictionary
+) -> void:
+	var rail_target: int = rng.randi_range(int(generation_profile["rail_min"]), int(generation_profile["rail_max"]))
+	var floor_set := _make_set(floor_cells)
+	var adjacency := _build_adjacency(floor_set, grid_size)
+	var free_cells: Array[Vector2i] = []
+
+	for cell in floor_cells:
+		if occupied.has(cell) or cell == start_cell or cell == exit_cell:
+			continue
+
+		free_cells.append(cell)
+
+	for _rail_index in range(rail_target):
+		var min_port_count: int = int(generation_profile.get("rail_port_min", 3))
+		var max_port_count: int = int(generation_profile.get("rail_port_max", 5))
+		var min_length: int = int(generation_profile.get("rail_min_length", 4))
+
+		if free_cells.size() < min_port_count:
+			break
+
+		var rail_layout := _take_random_rail_switch_layout(
+			free_cells,
+			occupied,
+			adjacency,
+			min_port_count,
+			max_port_count,
+			min_length
+		)
+		var ports: Array[Vector2i] = _normalize_rail_ports(rail_layout.get("ports", []))
+		var paths: Array = _normalize_rail_paths(rail_layout.get("paths", []))
+
+		if ports.size() < min_port_count:
+			break
+
+		for cell in ports:
+			occupied[cell] = true
+
+		for raw_path in paths:
+			if not (raw_path is Array):
+				continue
+
+			var path: Array = raw_path
+
+			for path_index in range(1, path.size() - 1):
+				occupied[path[path_index]] = true
+
+		var rail_id: String = "rail_%d" % rails.size()
+		rails[rail_id] = {
+			"id": rail_id,
+			"ports": ports,
+			# 多口中央变轨器没有出入口方向；paths 只表示不可通行的轨道路。
+			"paths": paths,
+			"connections": _make_clockwise_rail_connections(ports.size()),
+			"state": rng.randi_range(0, ports.size() - 1),
+			"color": _pick_color_name(),
+			"min_length": min_length
+		}
+
+	if rails.is_empty():
+		return
+
+	var lever_min: int = int(generation_profile["rail_lever_min"])
+	var lever_max: int = int(generation_profile["rail_lever_max"])
+	var lever_target: int = rng.randi_range(lever_min, lever_max)
+	var rail_ids := rails.keys()
+
+	for _i in range(lever_target):
+		if free_cells.is_empty():
+			break
+
+		var lever_cell: Vector2i = _take_random_free_cell(free_cells, occupied)
+
+		if lever_cell == INVALID_CELL:
+			break
+
+		var target_rail_id: String = str(rail_ids[rng.randi_range(0, rail_ids.size() - 1)])
+		rail_levers[lever_cell] = {
+			"target": target_rail_id
+		}
+		occupied[lever_cell] = true
+
+
+func _take_random_rail_switch_layout(
+	free_cells: Array[Vector2i],
+	occupied: Dictionary,
+	adjacency: Dictionary,
+	min_port_count: int,
+	max_port_count: int,
+	min_length: int
+) -> Dictionary:
+	var candidates := free_cells.duplicate()
+	var safe_min_port_count := maxi(3, min_port_count)
+	var safe_max_port_count := maxi(safe_min_port_count, max_port_count)
+	# 端口之间至少隔 1 格轨道路，所以基础路径长度要比端口数量更长。
+	var safe_min_path_size := maxi(safe_min_port_count * 2 - 1, min_length + 1)
+
+	while not candidates.is_empty():
+		var start_index := rng.randi_range(0, candidates.size() - 1)
+		var start_cell: Vector2i = candidates[start_index]
+		candidates.remove_at(start_index)
+
+		if occupied.has(start_cell):
+			continue
+
+		var path := _make_random_simple_path(start_cell, occupied, adjacency, safe_min_path_size)
+
+		if path.size() < safe_min_path_size:
+			continue
+
+		var port_count := rng.randi_range(safe_min_port_count, mini(safe_max_port_count, int((path.size() + 1) / 2)))
+		var port_indices := _sample_non_adjacent_rail_port_indices(path, port_count)
+
+		if port_indices.size() < safe_min_port_count:
+			continue
+
+		var ports := _make_rail_ports_from_indices(path, port_indices)
+
+		if _has_adjacent_cells(ports):
+			continue
+
+		var paths := _make_rail_track_segments(path, port_indices)
+
+		if paths.is_empty():
+			continue
+
+		for port in ports:
+			free_cells.erase(port)
+
+		for raw_track_path in paths:
+			if not (raw_track_path is Array):
+				continue
+
+			var track_path: Array = raw_track_path
+
+			for track_cell in track_path:
+				free_cells.erase(track_cell)
+
+		return {
+			"ports": ports,
+			"paths": paths
+		}
+
+	return {
+		"ports": [],
+		"paths": []
+	}
+
+
+func _make_random_simple_path(
+	start_cell: Vector2i,
+	occupied: Dictionary,
+	adjacency: Dictionary,
+	target_size: int
+) -> Array[Vector2i]:
+	var path: Array[Vector2i] = [start_cell]
+	var visited := {}
+	visited[start_cell] = true
+
+	while path.size() < target_size:
+		var current_cell: Vector2i = path[path.size() - 1]
+		var next_candidates: Array[Vector2i] = []
+
+		var neighbors: Array = adjacency.get(current_cell, [])
+
+		for raw_neighbor in neighbors:
+			if not (raw_neighbor is Vector2i):
+				continue
+
+			var neighbor: Vector2i = raw_neighbor
+
+			if occupied.has(neighbor) or visited.has(neighbor):
+				continue
+
+			next_candidates.append(neighbor)
+
+		if next_candidates.is_empty():
+			break
+
+		var next_cell: Vector2i = next_candidates[rng.randi_range(0, next_candidates.size() - 1)]
+		path.append(next_cell)
+		visited[next_cell] = true
+
+	return path
+
+
+func _sample_non_adjacent_rail_port_indices(path: Array[Vector2i], port_count: int) -> Array[int]:
+	var result: Array[int] = []
+
+	if port_count <= 1 or path.is_empty():
+		return result
+
+	var max_index := path.size() - 1
+	var last_index := -999999
+
+	for i in range(port_count):
+		var raw_index := int(round(float(i) * float(max_index) / float(port_count - 1)))
+		var index := clampi(raw_index, 0, max_index)
+
+		while index <= max_index and (index - last_index) < 2:
+			index += 1
+
+		if index > max_index:
+			index = max_index
+
+		while index > 0 and (index - last_index) < 2:
+			index -= 1
+
+		if not result.is_empty() and (index - last_index) < 2:
+			continue
+
+		result.append(index)
+		last_index = index
+
+	return result
+
+
+func _make_rail_ports_from_indices(path: Array[Vector2i], port_indices: Array[int]) -> Array[Vector2i]:
+	var result: Array[Vector2i] = []
+
+	for index in port_indices:
+		if index < 0 or index >= path.size():
+			continue
+
+		result.append(path[index])
+
+	return result
+
+
+func _make_rail_track_segments(path: Array[Vector2i], port_indices: Array[int]) -> Array:
+	var result: Array = []
+
+	for i in range(port_indices.size() - 1):
+		var start_index: int = port_indices[i]
+		var end_index: int = port_indices[i + 1]
+
+		if end_index - start_index < 2:
+			continue
+
+		var segment: Array[Vector2i] = []
+
+		for path_index in range(start_index, end_index + 1):
+			segment.append(path[path_index])
+
+		if segment.size() >= 3:
+			result.append(segment)
+
+	return result
+
+
+func _has_adjacent_cells(cells: Array[Vector2i]) -> bool:
+	for i in range(cells.size()):
+		for j in range(i + 1, cells.size()):
+			if _is_cardinal_adjacent(cells[i], cells[j]):
+				return true
+
+	return false
+
+
+func _is_cardinal_adjacent(a: Vector2i, b: Vector2i) -> bool:
+	return abs(a.x - b.x) + abs(a.y - b.y) == 1
 
 
 func _take_random_free_cell(cells: Array[Vector2i], occupied: Dictionary) -> Vector2i:
@@ -1189,6 +1797,26 @@ func _build_portal_links(portals: Dictionary) -> Dictionary:
 	return links
 
 
+func _count_portal_pairs(portals: Dictionary) -> int:
+	var groups := {}
+
+	for portal_cell in portals.keys():
+		var portal_group: String = portals[portal_cell]
+
+		if not groups.has(portal_group):
+			groups[portal_group] = 0
+
+		groups[portal_group] = int(groups[portal_group]) + 1
+
+	var result := 0
+
+	for portal_group in groups.keys():
+		if int(groups[portal_group]) >= 2:
+			result += 1
+
+	return result
+
+
 func _make_state_key(context: SolverContext, state: SolverState) -> String:
 	var cell_id: int = state.cell.y * context.grid_size + state.cell.x
 	var key_counts_signature: String = _encode_key_counts(state.key_counts)
@@ -1295,6 +1923,108 @@ func _get_portal_map(level: Dictionary) -> Dictionary:
 	return _entities_to_cell_map(level.get("entities", []), ENTITY_PORTAL, "group")
 
 
+func _get_rail_map(level: Dictionary) -> Dictionary:
+	if level.has("rails"):
+		return level["rails"]
+
+	if level.has("layers") and level["layers"].has(LAYER_MOVEMENT):
+		var movement_layer: Dictionary = level["layers"][LAYER_MOVEMENT]
+
+		if movement_layer.has("rails"):
+			return movement_layer["rails"]
+
+	return {}
+
+
+func _get_rail_lever_map(level: Dictionary) -> Dictionary:
+	if level.has("rail_levers"):
+		return level["rail_levers"]
+
+	if level.has("layers") and level["layers"].has(LAYER_MOVEMENT):
+		var movement_layer: Dictionary = level["layers"][LAYER_MOVEMENT]
+
+		if movement_layer.has("rail_levers"):
+			return movement_layer["rail_levers"]
+
+	return {}
+
+
+func _normalize_rail_ports(raw_ports: Array) -> Array[Vector2i]:
+	var result: Array[Vector2i] = []
+
+	for port in raw_ports:
+		if port is Vector2i:
+			result.append(port)
+
+	return result
+
+
+func _normalize_rail_paths(raw_paths: Array) -> Array:
+	var result: Array = []
+
+	for raw_path in raw_paths:
+		if not (raw_path is Array):
+			continue
+
+		var path: Array[Vector2i] = []
+
+		for cell in raw_path:
+			if cell is Vector2i:
+				path.append(cell)
+
+		if path.size() >= 2:
+			result.append(path)
+
+	return result
+
+
+func _normalize_rail_connections(raw_connections: Array, port_count: int) -> Array:
+	var result: Array = []
+
+	for raw_connection in raw_connections:
+		if not (raw_connection is Array):
+			continue
+
+		var connection: Array = raw_connection as Array
+
+		if connection.size() < 2:
+			continue
+
+		var a: int = int(connection[0])
+		var b: int = int(connection[1])
+
+		if a == b:
+			continue
+
+		if a < 0 or a >= port_count or b < 0 or b >= port_count:
+			continue
+
+		result.append([a, b])
+
+	return result
+
+
+func _make_clockwise_rail_connections(port_count: int) -> Array:
+	var result: Array = []
+
+	if port_count < 2:
+		return result
+
+	for i in range(port_count):
+		result.append([i, (i + 1) % port_count])
+
+	return result
+
+
+func _encode_rail_state_array(values: Array[int]) -> String:
+	var parts: Array[String] = []
+
+	for value in values:
+		parts.append(str(value))
+
+	return ",".join(parts)
+
+
 func _entities_to_cell_map(entities: Array, target_type: String, value_key: String) -> Dictionary:
 	var result := {}
 
@@ -1343,7 +2073,7 @@ func _collect_used_colors(keys: Dictionary, doors: Dictionary) -> Dictionary:
 	return result
 
 
-func _matches_difficulty_target(solved: Dictionary, profile: Dictionary) -> bool:
+func _matches_step_target(solved: Dictionary, profile: Dictionary) -> bool:
 	var steps := int(solved["steps"])
 
 	if steps < int(profile["target_min_steps"]):
@@ -1353,6 +2083,128 @@ func _matches_difficulty_target(solved: Dictionary, profile: Dictionary) -> bool
 		return false
 
 	return true
+
+
+func _get_difficulty_fail_reason(level: Dictionary, solved: Dictionary, profile: Dictionary) -> String:
+	if not _matches_step_target(solved, profile):
+		return "step_target_mismatch"
+
+	var metrics := _build_difficulty_metrics(level, solved)
+
+	if int(metrics["main_path_length"]) < int(profile.get("min_main_path_length", 0)):
+		return "main_path_below_difficulty_target"
+
+	if int(metrics["solver_state_count"]) < int(profile.get("min_solver_state_count", 0)):
+		return "solver_state_count_below_difficulty_target"
+
+	if int(metrics["required_branch_key_count"]) < int(profile.get("min_required_branch_key_count", 0)):
+		return "not_enough_required_branch_keys"
+
+	if int(metrics["required_key_dead_end_count"]) < int(profile.get("min_required_key_dead_end_count", 0)):
+		return "not_enough_required_key_dead_ends"
+
+	if int(metrics["required_key_min_distance_from_main"]) < int(profile.get("min_required_key_distance_from_main", 0)):
+		return "required_key_too_close_to_main_path"
+
+	if int(metrics["estimated_backtrack_steps"]) < int(profile.get("min_backtrack_steps", 0)):
+		return "backtrack_below_difficulty_target"
+
+	if int(metrics["decision_branch_count"]) < int(profile.get("min_decision_branch_count", 0)):
+		return "not_enough_decision_branches"
+
+	return ""
+
+
+func _build_difficulty_metrics(level: Dictionary, solved: Dictionary) -> Dictionary:
+	var floor_cells := _get_floor_cells(level)
+	var floor_set := _make_set(floor_cells)
+	var grid_size := int(level.get("grid_size", 0))
+	var adjacency := _build_adjacency(floor_set, grid_size)
+	var main_path: Array = level.get("main_path", [])
+	var path_set := _make_set(main_path)
+	var required_key_cells: Array = level.get("required_key_cells", [])
+	var required_branch_key_count := 0
+	var required_key_dead_end_count := 0
+	var required_key_distance_total := 0
+	var required_key_min_distance := 999999
+	var estimated_backtrack_steps := 0
+
+	for raw_cell in required_key_cells:
+		if not (raw_cell is Vector2i):
+			continue
+
+		var cell: Vector2i = raw_cell
+		var distance_from_main := _distance_to_path(cell, path_set, adjacency)
+		required_key_distance_total += distance_from_main
+		required_key_min_distance = mini(required_key_min_distance, distance_from_main)
+
+		if distance_from_main > 0:
+			required_branch_key_count += 1
+			estimated_backtrack_steps += distance_from_main * 2
+
+			if adjacency.has(cell) and adjacency[cell].size() == 1:
+				required_key_dead_end_count += 1
+
+	if required_key_cells.is_empty():
+		required_key_min_distance = 0
+
+	return {
+		"optimal_steps": int(solved.get("steps", -1)),
+		"solver_state_count": int(solved.get("state_count", 0)),
+		"solver_max_queue_size": int(solved.get("max_queue_size", 0)),
+		"main_path_length": main_path.size(),
+		"floor_count": floor_cells.size(),
+		"required_gate_count": int(level.get("required_gate_count", 0)),
+		"required_key_count": required_key_cells.size(),
+		"required_branch_key_count": required_branch_key_count,
+		"required_key_dead_end_count": required_key_dead_end_count,
+		"required_key_min_distance_from_main": required_key_min_distance,
+		"required_key_distance_from_main_total": required_key_distance_total,
+		"estimated_backtrack_steps": estimated_backtrack_steps,
+		"decision_branch_count": _count_decision_branch_cells(adjacency),
+		"dead_end_count": _get_leaves(adjacency).size(),
+		"portal_pair_count": _count_portal_pairs(_get_portal_map(level)),
+		"rail_count": _get_rail_map(level).size()
+	}
+
+
+func _distance_to_path(cell: Vector2i, path_set: Dictionary, adjacency: Dictionary) -> int:
+	if path_set.has(cell):
+		return 0
+
+	if not adjacency.has(cell):
+		return 0
+
+	var queue: Array[Vector2i] = [cell]
+	var head := 0
+	var distances := {}
+	distances[cell] = 0
+
+	while head < queue.size():
+		var current_cell := queue[head]
+		head += 1
+
+		if path_set.has(current_cell):
+			return int(distances[current_cell])
+
+		for neighbor in adjacency[current_cell]:
+			if distances.has(neighbor):
+				continue
+
+			distances[neighbor] = int(distances[current_cell]) + 1
+			queue.append(neighbor)
+
+	return 0
+
+
+func _count_decision_branch_cells(adjacency: Dictionary) -> int:
+	var count := 0
+
+	for cell in adjacency.keys():
+		if adjacency[cell].size() >= 3:
+			count += 1
+
+	return count
 
 
 func _sort_colors_by_config(color_set: Dictionary) -> Array[String]:

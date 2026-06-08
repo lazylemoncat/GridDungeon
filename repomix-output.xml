@@ -53,6 +53,7 @@ assets/ui/.gitkeep
 assets/wall/.gitkeep
 autoload/GameConfig.gd
 autoload/GameConfig.gd.uid
+export_presets.cfg
 icon.svg
 icon.svg.import
 project.godot
@@ -69,26 +70,551 @@ scripts/door.gd
 scripts/door.gd.uid
 scripts/key.gd
 scripts/key.gd.uid
-scripts/level_difficulty_selector.gd
-scripts/level_difficulty_selector.gd.uid
 scripts/level_generator.gd
 scripts/level_generator.gd.uid
+scripts/level_request_selector.gd
+scripts/level_request_selector.gd.uid
 scripts/main.gd
 scripts/main.gd.uid
 scripts/player.gd
 scripts/player.gd.uid
 scripts/portal.gd
 scripts/portal.gd.uid
+scripts/rail_lever.gd
+scripts/rail_lever.gd.uid
+scripts/rail.gd
+scripts/rail.gd.uid
 scripts/stairs.gd
 scripts/stairs.gd.uid
 scripts/ui/hud.gd
 scripts/ui/hud.gd.uid
+scripts/ui/mobile_controls.gd
+scripts/ui/mobile_controls.gd.uid
 scripts/wall.gd
 scripts/wall.gd.uid
 </directory_structure>
 
 <files>
 This section contains the contents of the repository's files.
+
+<file path="export_presets.cfg">
+[preset.0]
+
+name="Windows Desktop"
+platform="Windows Desktop"
+runnable=true
+dedicated_server=false
+custom_features=""
+export_filter="all_resources"
+include_filter=""
+exclude_filter=""
+export_path="./GridDungeon.exe"
+patches=PackedStringArray()
+patch_delta_encoding=false
+patch_delta_compression_level_zstd=19
+patch_delta_min_reduction=0.1
+patch_delta_include_filters="*"
+patch_delta_exclude_filters=""
+encryption_include_filters=""
+encryption_exclude_filters=""
+seed=0
+encrypt_pck=false
+encrypt_directory=false
+script_export_mode=2
+
+[preset.0.options]
+
+custom_template/debug=""
+custom_template/release=""
+debug/export_console_wrapper=0
+binary_format/embed_pck=true
+texture_format/s3tc_bptc=true
+texture_format/etc2_astc=false
+shader_baker/enabled=false
+binary_format/architecture="x86_64"
+codesign/enable=false
+codesign/timestamp=true
+codesign/timestamp_server_url=""
+codesign/digest_algorithm=1
+codesign/description=""
+codesign/custom_options=PackedStringArray()
+application/modify_resources=true
+application/icon=""
+application/console_wrapper_icon=""
+application/icon_interpolation=4
+application/file_version=""
+application/product_version=""
+application/company_name=""
+application/product_name=""
+application/file_description=""
+application/copyright=""
+application/trademarks=""
+application/export_angle=0
+application/export_d3d12=0
+application/d3d12_agility_sdk_multiarch=true
+ssh_remote_deploy/enabled=false
+ssh_remote_deploy/host="user@host_ip"
+ssh_remote_deploy/port="22"
+ssh_remote_deploy/extra_args_ssh=""
+ssh_remote_deploy/extra_args_scp=""
+ssh_remote_deploy/run_script="Expand-Archive -LiteralPath '{temp_dir}\\{archive_name}' -DestinationPath '{temp_dir}'
+$action = New-ScheduledTaskAction -Execute '{temp_dir}\\{exe_name}' -Argument '{cmd_args}'
+$trigger = New-ScheduledTaskTrigger -Once -At 00:00
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+$task = New-ScheduledTask -Action $action -Trigger $trigger -Settings $settings
+Register-ScheduledTask godot_remote_debug -InputObject $task -Force:$true
+Start-ScheduledTask -TaskName godot_remote_debug
+while (Get-ScheduledTask -TaskName godot_remote_debug | ? State -eq running) { Start-Sleep -Milliseconds 100 }
+Unregister-ScheduledTask -TaskName godot_remote_debug -Confirm:$false -ErrorAction:SilentlyContinue"
+ssh_remote_deploy/cleanup_script="Stop-ScheduledTask -TaskName godot_remote_debug -ErrorAction:SilentlyContinue
+Unregister-ScheduledTask -TaskName godot_remote_debug -Confirm:$false -ErrorAction:SilentlyContinue
+Remove-Item -Recurse -Force '{temp_dir}'"
+</file>
+
+<file path="scripts/level_request_selector.gd">
+class_name LevelRequestSelector
+extends RefCounted
+
+const GENERATION_RETRY_COUNT := 20
+
+var rng := RandomNumberGenerator.new()
+
+
+func _init() -> void:
+	rng.randomize()
+
+
+func pick_level_request(floor_number: int) -> Dictionary:
+	var profile := _make_profile()
+	profile["floor_number"] = floor_number
+
+	return {
+		"grid_size": _pick_grid_size(),
+		"profile": profile
+	}
+
+
+func _pick_grid_size() -> int:
+	return rng.randi_range(GameConfig.MIN_GRID_SIZE, GameConfig.MAX_GRID_SIZE)
+
+
+func _make_profile() -> Dictionary:
+	return {
+		"target_min_steps": 0,
+		"target_max_steps": 999999,
+		"required_gate_min": 2,
+		"required_gate_max": 4,
+		"min_floor_ratio": 0.64,
+		"max_floor_ratio": 0.86,
+		"min_floor_count": 24,
+		"min_extra_leaves": 4,
+		"main_path_door_spacing": 4,
+		"decoy_door_extra_max": 2,
+		"loose_key_min": 1,
+		"loose_key_max": 3,
+		"portal_pair_min": 1,
+		"portal_pair_max": 2,
+		"rail_min": 1,
+		"rail_max": 2,
+		"rail_port_min": 3,
+		"rail_port_max": 5,
+		"rail_lever_min": 0,
+		"rail_lever_max": 0,
+		"require_unique_optimal_solution": true,
+		"solution_policy": "unique_optimal"
+	}
+</file>
+
+<file path="scripts/level_request_selector.gd.uid">
+uid://byxl64117sik7
+</file>
+
+<file path="scripts/rail_lever.gd">
+extends Node2D
+
+var cell := Vector2i.ZERO
+var target_rail_id := ""
+var state := 0
+
+
+func set_target_rail_id(value: String) -> void:
+	target_rail_id = value
+	queue_redraw()
+
+
+func set_state(value: int) -> void:
+	state = value
+	queue_redraw()
+
+
+func set_cell(value: Vector2i) -> void:
+	cell = value
+	refresh_layout()
+
+
+func refresh_layout() -> void:
+	position = GameConfig.cell_to_world(cell)
+	queue_redraw()
+
+
+func _draw() -> void:
+	var size := float(GameConfig.cell_size)
+	var center := Vector2(size, size) / 2.0
+	var base_radius := size * 0.19
+	var knob_radius := size * 0.085
+	var line_width := maxf(2.0, size * 0.055)
+	var lever_color := Color(0.9, 0.68, 0.18)
+	var metal_color := Color(0.35, 0.37, 0.40)
+	var tick_count := 8
+	var angle := -PI / 2.0 + TAU * float(state % tick_count) / float(tick_count)
+	var knob_position := center + Vector2(cos(angle), sin(angle)) * size * 0.27
+
+	draw_circle(center, base_radius, Color(0.06, 0.06, 0.07))
+	draw_arc(center, base_radius, 0.0, TAU, 32, metal_color, maxf(1.0, size * 0.04))
+	draw_line(center, knob_position, lever_color, line_width)
+	draw_circle(knob_position, knob_radius, lever_color.lightened(0.15))
+	draw_circle(center, size * 0.06, metal_color.lightened(0.2))
+</file>
+
+<file path="scripts/rail_lever.gd.uid">
+uid://2s6h45fk7bgk
+</file>
+
+<file path="scripts/rail.gd">
+extends Node2D
+
+var rail_id := ""
+var ports: Array[Vector2i] = []
+var connections: Array = []
+var paths: Array = []
+var state := 0
+var color_name := "cyan"
+
+
+func set_rail_data(
+	p_rail_id: String,
+	p_ports: Array[Vector2i],
+	p_connections: Array,
+	p_state: int,
+	p_color_name: String,
+	p_paths: Array = []
+) -> void:
+	rail_id = p_rail_id
+	ports = p_ports.duplicate()
+	connections = p_connections.duplicate(true)
+	paths = p_paths.duplicate(true)
+	state = p_state
+	color_name = p_color_name
+	queue_redraw()
+
+
+func set_state(value: int) -> void:
+	state = value
+	queue_redraw()
+
+
+func refresh_layout() -> void:
+	queue_redraw()
+
+
+func _draw() -> void:
+	if ports.is_empty():
+		return
+
+	var size := float(GameConfig.cell_size)
+	var rail_color := GameConfig.get_key_color(color_name)
+	var inactive_color := Color(0.24, 0.28, 0.32)
+	var base_color := Color(0.05, 0.07, 0.09)
+
+	if not paths.is_empty():
+		_draw_directed_paths(paths, rail_color, inactive_color, base_color, size)
+		return
+
+	var centers: Array[Vector2] = []
+	var switch_center := Vector2.ZERO
+
+	for port_cell in ports:
+		var center := GameConfig.cell_to_world(port_cell) + Vector2(size, size) / 2.0
+		centers.append(center)
+		switch_center += center
+
+	switch_center /= float(centers.size())
+
+	var active_connection := _get_active_connection()
+	var active_a := -1
+	var active_b := -1
+
+	if active_connection.size() >= 2:
+		active_a = int(active_connection[0])
+		active_b = int(active_connection[1])
+
+	_draw_inactive_hands(centers, switch_center, inactive_color, size)
+	_draw_active_hands(centers, switch_center, active_a, active_b, rail_color, size)
+	_draw_ports(centers, active_a, active_b, rail_color, inactive_color, base_color, size)
+	_draw_center(switch_center, rail_color, base_color, size)
+
+
+func _get_active_connection() -> Array:
+	if connections.is_empty():
+		return []
+
+	return connections[wrapi(state, 0, connections.size())]
+
+
+func _draw_inactive_hands(
+	centers: Array[Vector2],
+	switch_center: Vector2,
+	inactive_color: Color,
+	size: float
+) -> void:
+	var line_width := maxf(1.0, size * 0.025)
+
+	for center in centers:
+		draw_line(switch_center, center, inactive_color.darkened(0.18), line_width)
+
+
+func _draw_active_hands(
+	centers: Array[Vector2],
+	switch_center: Vector2,
+	active_a: int,
+	active_b: int,
+	rail_color: Color,
+	size: float
+) -> void:
+	if active_a < 0 or active_b < 0:
+		return
+
+	if active_a >= centers.size() or active_b >= centers.size():
+		return
+
+	var line_width := maxf(3.0, size * 0.075)
+	draw_line(centers[active_a], switch_center, rail_color, line_width)
+	draw_line(switch_center, centers[active_b], rail_color, line_width)
+	draw_line(centers[active_a], centers[active_b], rail_color.lightened(0.12), maxf(1.0, size * 0.025))
+
+
+func _draw_ports(
+	centers: Array[Vector2],
+	active_a: int,
+	active_b: int,
+	rail_color: Color,
+	inactive_color: Color,
+	base_color: Color,
+	size: float
+) -> void:
+	var radius := size * 0.20
+	var active_radius := size * 0.25
+	var outline_width := maxf(1.0, size * 0.04)
+
+	for i in range(centers.size()):
+		var is_active := i == active_a or i == active_b
+		var center := centers[i]
+		var use_color := rail_color if is_active else inactive_color
+		var use_radius := active_radius if is_active else radius
+
+		draw_circle(center, use_radius, base_color)
+		draw_arc(center, use_radius, 0.0, TAU, 36, use_color, outline_width)
+		draw_circle(center, size * 0.055, use_color)
+
+
+func _draw_center(switch_center: Vector2, rail_color: Color, base_color: Color, size: float) -> void:
+	var center_radius := size * 0.18
+	draw_circle(switch_center, center_radius, base_color)
+	draw_arc(switch_center, center_radius, 0.0, TAU, 40, rail_color.lightened(0.12), maxf(1.0, size * 0.045))
+	draw_circle(switch_center, size * 0.07, rail_color.lightened(0.2))
+
+
+func _draw_directed_paths(raw_paths: Array, rail_color: Color, inactive_color: Color, base_color: Color, size: float) -> void:
+	var line_width := maxf(3.0, size * 0.08)
+	var port_radius := size * 0.23
+	var blocked_radius := size * 0.14
+
+	for raw_path in raw_paths:
+		if not (raw_path is Array):
+			continue
+
+		var path: Array = raw_path
+
+		if path.size() < 2:
+			continue
+
+		var points: Array[Vector2] = []
+
+		for cell in path:
+			if cell is Vector2i:
+				points.append(GameConfig.cell_to_world(cell) + Vector2(size, size) / 2.0)
+
+		if points.size() < 2:
+			continue
+
+		for i in range(points.size() - 1):
+			draw_line(points[i], points[i + 1], rail_color, line_width)
+
+		for i in range(1, points.size() - 1):
+			draw_circle(points[i], blocked_radius, base_color)
+			draw_arc(points[i], blocked_radius, 0.0, TAU, 24, inactive_color.lightened(0.2), maxf(1.0, size * 0.035))
+
+		draw_circle(points[0], port_radius, base_color)
+		draw_arc(points[0], port_radius, 0.0, TAU, 36, rail_color, maxf(1.0, size * 0.05))
+		draw_circle(points[0], size * 0.06, rail_color.lightened(0.2))
+
+		var exit_center: Vector2 = points[points.size() - 1]
+		draw_circle(exit_center, port_radius, base_color)
+		draw_arc(exit_center, port_radius, 0.0, TAU, 36, rail_color.lightened(0.28), maxf(1.0, size * 0.05))
+
+		var from_center: Vector2 = points[points.size() - 2]
+		var direction: Vector2 = (exit_center - from_center).normalized()
+		var side: Vector2 = direction.orthogonal() * size * 0.09
+		var tip: Vector2 = exit_center - direction * size * 0.05
+		var back: Vector2 = exit_center - direction * size * 0.22
+		draw_colored_polygon([tip, back + side, back - side], rail_color.lightened(0.35))
+</file>
+
+<file path="scripts/rail.gd.uid">
+uid://kys860lr2r5w
+</file>
+
+<file path="scripts/ui/mobile_controls.gd">
+extends CanvasLayer
+
+signal move_requested(direction: Vector2i)
+
+const DEFAULT_BUTTON_SIZE := 64.0
+const MIN_BUTTON_SIZE := 48.0
+const MAX_BUTTON_SIZE := 76.0
+const EDGE_MARGIN := 24.0
+const BOTTOM_MARGIN := 24.0
+const BUTTON_ALPHA := 0.78
+
+var root: Control
+var up_button: Button
+var down_button: Button
+var left_button: Button
+var right_button: Button
+var input_enabled := true
+var cached_reserved_bottom_height := 0.0
+
+
+func _ready() -> void:
+	layer = 50
+	_build_ui()
+	get_viewport().size_changed.connect(_update_layout)
+	_update_layout()
+
+
+func _build_ui() -> void:
+	root = Control.new()
+	root.name = "MobileControlsRoot"
+	root.anchor_right = 1.0
+	root.anchor_bottom = 1.0
+	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(root)
+
+	up_button = _create_direction_button("UpButton", "↑", Vector2i(0, -1))
+	down_button = _create_direction_button("DownButton", "↓", Vector2i(0, 1))
+	left_button = _create_direction_button("LeftButton", "←", Vector2i(-1, 0))
+	right_button = _create_direction_button("RightButton", "→", Vector2i(1, 0))
+
+	root.add_child(up_button)
+	root.add_child(down_button)
+	root.add_child(left_button)
+	root.add_child(right_button)
+
+
+func _create_direction_button(button_name: String, label: String, direction: Vector2i) -> Button:
+	var button := Button.new()
+	button.name = button_name
+	button.text = label
+	button.focus_mode = Control.FOCUS_NONE
+	button.mouse_filter = Control.MOUSE_FILTER_STOP
+	button.pressed.connect(_emit_move_requested.bind(direction))
+	_apply_button_style(button)
+	return button
+
+
+func _apply_button_style(button: Button) -> void:
+	var normal := StyleBoxFlat.new()
+	normal.bg_color = Color(0.08, 0.09, 0.11, BUTTON_ALPHA)
+	normal.border_color = Color(1.0, 1.0, 1.0, 0.32)
+	normal.set_border_width_all(2)
+	normal.set_corner_radius_all(16)
+	button.add_theme_stylebox_override("normal", normal)
+
+	var hover := StyleBoxFlat.new()
+	hover.bg_color = Color(0.15, 0.17, 0.22, 0.86)
+	hover.border_color = Color(1.0, 1.0, 1.0, 0.45)
+	hover.set_border_width_all(2)
+	hover.set_corner_radius_all(16)
+	button.add_theme_stylebox_override("hover", hover)
+
+	var pressed := StyleBoxFlat.new()
+	pressed.bg_color = Color(0.25, 0.31, 0.42, 0.92)
+	pressed.border_color = Color(1.0, 1.0, 1.0, 0.62)
+	pressed.set_border_width_all(2)
+	pressed.set_corner_radius_all(16)
+	button.add_theme_stylebox_override("pressed", pressed)
+
+	var disabled := StyleBoxFlat.new()
+	disabled.bg_color = Color(0.08, 0.08, 0.09, 0.28)
+	disabled.border_color = Color(1.0, 1.0, 1.0, 0.12)
+	disabled.set_border_width_all(2)
+	disabled.set_corner_radius_all(16)
+	button.add_theme_stylebox_override("disabled", disabled)
+
+
+func _update_layout() -> void:
+	if root == null:
+		return
+
+	var viewport_size := get_viewport().get_visible_rect().size
+	var button_size: float = clampf(viewport_size.y * 0.095, MIN_BUTTON_SIZE, MAX_BUTTON_SIZE)
+	var gap: float = maxf(8.0, button_size * 0.14)
+	var pad_size: float = button_size * 3.0 + gap * 2.0
+	var start_x: float = viewport_size.x - pad_size - EDGE_MARGIN
+	var start_y: float = viewport_size.y - pad_size - BOTTOM_MARGIN
+
+	start_x = maxf(EDGE_MARGIN, start_x)
+	start_y = maxf(EDGE_MARGIN, start_y)
+	cached_reserved_bottom_height = viewport_size.y - start_y + EDGE_MARGIN
+
+	_set_button_rect(up_button, Vector2(start_x + button_size + gap, start_y), button_size)
+	_set_button_rect(left_button, Vector2(start_x, start_y + button_size + gap), button_size)
+	_set_button_rect(right_button, Vector2(start_x + (button_size + gap) * 2.0, start_y + button_size + gap), button_size)
+	_set_button_rect(down_button, Vector2(start_x + button_size + gap, start_y + (button_size + gap) * 2.0), button_size)
+
+
+func _set_button_rect(button: Button, position: Vector2, button_size: float) -> void:
+	button.position = position
+	button.size = Vector2(button_size, button_size)
+	button.custom_minimum_size = Vector2(button_size, button_size)
+	button.add_theme_font_size_override("font_size", int(button_size * 0.52))
+
+
+func _emit_move_requested(direction: Vector2i) -> void:
+	if not input_enabled:
+		return
+
+	move_requested.emit(direction)
+
+
+func set_input_enabled(enabled: bool) -> void:
+	input_enabled = enabled
+
+	for button in [up_button, down_button, left_button, right_button]:
+		if button != null:
+			button.disabled = not enabled
+
+
+func get_reserved_bottom_height() -> float:
+	if not visible:
+		return 0.0
+
+	return cached_reserved_bottom_height
+</file>
+
+<file path="scripts/ui/mobile_controls.gd.uid">
+uid://dddhj4bkuh8gy
+</file>
 
 <file path=".editorconfig">
 root = true
@@ -143,10 +669,23 @@ charset = utf-8
 <file path="autoload/GameConfig.gd">
 extends Node
 
-const MIN_GRID_SIZE := 2
+const MIN_GRID_SIZE := 9
 const MAX_GRID_SIZE := 18
-const CELL_SIZE := 56
-const BOARD_OFFSET := Vector2(180, 120)
+
+# 这个值不再直接决定实际格子大小，只作为桌面端的最大参考尺寸。
+const BASE_CELL_SIZE := 56
+const MIN_CELL_SIZE := 18
+const MAX_CELL_SIZE := 72
+
+# HUD 占用上方空间。棋盘会在剩余区域内居中缩放。
+const BOARD_MARGIN_LEFT := 32.0
+const BOARD_MARGIN_RIGHT := 32.0
+const BOARD_MARGIN_TOP := 140.0
+const BOARD_MARGIN_BOTTOM := 32.0
+
+# 运行时布局结果。所有棋盘实体都应该读取这两个值，而不是写死 56 / Vector2(180, 120)。
+var cell_size := BASE_CELL_SIZE
+var board_offset := Vector2(180, 120)
 
 const KEY_COLOR_NAMES := ["red", "blue", "green", "yellow", "purple", "orange", "cyan", "pink", "white"]
 
@@ -161,6 +700,30 @@ const KEY_COLORS := {
 	"pink": Color(1.0, 0.35, 0.68),
 	"white": Color(0.92, 0.92, 0.88)
 }
+
+
+func update_board_layout(viewport_size: Vector2, grid_size: int, reserved_bottom: float = 0.0) -> void:
+	var safe_grid_size: int = maxi(1, grid_size)
+	var actual_bottom_margin: float = maxf(BOARD_MARGIN_BOTTOM, reserved_bottom)
+	var available_width: float = maxf(1.0, viewport_size.x - BOARD_MARGIN_LEFT - BOARD_MARGIN_RIGHT)
+	var available_height: float = maxf(1.0, viewport_size.y - BOARD_MARGIN_TOP - actual_bottom_margin)
+	var raw_cell_size: int = int(floor(minf(available_width, available_height) / float(safe_grid_size)))
+
+	# 以“放得下”为最高优先级。窗口极小时允许小于 MIN_CELL_SIZE。
+	if raw_cell_size < MIN_CELL_SIZE:
+		cell_size = maxi(8, raw_cell_size)
+	else:
+		cell_size = clampi(raw_cell_size, MIN_CELL_SIZE, MAX_CELL_SIZE)
+
+	var board_size: float = float(cell_size * safe_grid_size)
+	var offset_x: float = (viewport_size.x - board_size) / 2.0
+	var offset_y: float = BOARD_MARGIN_TOP + maxf(0.0, (available_height - board_size) / 2.0)
+
+	board_offset = Vector2(offset_x, offset_y)
+
+
+func cell_to_world(cell: Vector2i) -> Vector2:
+	return board_offset + Vector2(cell.x * cell_size, cell.y * cell_size)
 
 
 func get_key_color(color_name: String) -> Color:
@@ -199,6 +762,8 @@ dest_files=["res://.godot/imported/icon.svg-218a8f2b3041327d8a5756f3a245f83b.cte
 compress/mode=0
 compress/high_quality=false
 compress/lossy_quality=0.7
+compress/uastc_level=0
+compress/rdo_quality_loss=0.0
 compress/hdr_compression=1
 compress/normal_map=0
 compress/channel_pack=0
@@ -206,6 +771,10 @@ mipmaps/generate=false
 mipmaps/limit=-1
 roughness/mode=0
 roughness/src_normal=""
+process/channel_remap/red=0
+process/channel_remap/green=1
+process/channel_remap/blue=2
+process/channel_remap/alpha=3
 process/fix_alpha_border=true
 process/premult_alpha=false
 process/normal_map_invert_y=false
@@ -229,21 +798,27 @@ editor/convert_colors_with_editor_theme=false
 
 config_version=5
 
+[animation]
+
+compatibility/default_parent_skeleton_in_mesh_instance_3d=true
+
 [application]
 
 config/name="GridDungeon"
 run/main_scene="res://scenes/main.tscn"
-config/features=PackedStringArray("4.4", "GL Compatibility")
+config/features=PackedStringArray("4.6", "GL Compatibility")
 config/icon="res://icon.svg"
-
-[display]
-
-window/size/viewport_width=1280
-window/size/viewport_height=1200
 
 [autoload]
 
 GameConfig="*res://autoload/GameConfig.gd"
+
+[display]
+
+window/size/viewport_width=1280
+window/size/viewport_height=720
+window/stretch/mode="canvas_items"
+window/stretch/aspect="expand"
 
 [input]
 
@@ -562,7 +1137,6 @@ script = ExtResource("1_wall")
 extends Node2D
 
 @export var texture: Texture2D
-@export var cell_size := 56
 @export var color_name := "red"
 
 var cell := Vector2i.ZERO
@@ -570,6 +1144,10 @@ var cell := Vector2i.ZERO
 
 func set_cell(value: Vector2i) -> void:
 	cell = value
+	refresh_layout()
+
+
+func refresh_layout() -> void:
 	position = _cell_to_world(cell)
 	queue_redraw()
 
@@ -580,21 +1158,24 @@ func set_color_name(value: String) -> void:
 
 
 func _draw() -> void:
+	var size := float(GameConfig.cell_size)
+
 	if texture != null:
-		draw_texture_rect(texture, Rect2(Vector2.ZERO, Vector2(cell_size, cell_size)), false)
+		draw_texture_rect(texture, Rect2(Vector2.ZERO, Vector2(size, size)), false)
 		return
 
 	var door_color := GameConfig.get_key_color(color_name)
-	var rect := Rect2(Vector2(7, 5), Vector2(cell_size - 14, cell_size - 10))
+	var rect := Rect2(Vector2(size * 0.125, size * 0.09), Vector2(size * 0.75, size * 0.82))
+	var outline_width := maxf(1.0, size * 0.05)
 
 	draw_rect(rect, door_color, true)
-	draw_rect(rect, Color(0.08, 0.06, 0.03), false, 3.0)
-	draw_circle(Vector2(cell_size * 0.72, cell_size * 0.52), 4.0, Color(1.0, 0.9, 0.55))
-	draw_rect(Rect2(Vector2(cell_size * 0.38, cell_size * 0.42), Vector2(14, 12)), Color(0.1, 0.1, 0.12), true)
+	draw_rect(rect, Color(0.08, 0.06, 0.03), false, outline_width)
+	draw_circle(Vector2(size * 0.72, size * 0.52), maxf(2.0, size * 0.07), Color(1.0, 0.9, 0.55))
+	draw_rect(Rect2(Vector2(size * 0.38, size * 0.42), Vector2(size * 0.25, size * 0.22)), Color(0.1, 0.1, 0.12), true)
 
 
 func _cell_to_world(value: Vector2i) -> Vector2:
-	return GameConfig.BOARD_OFFSET + Vector2(value.x * cell_size, value.y * cell_size)
+	return GameConfig.cell_to_world(value)
 </file>
 
 <file path="scripts/door.gd.uid">
@@ -605,7 +1186,6 @@ uid://bau3cvqpi4hc5
 extends Node2D
 
 @export var texture: Texture2D
-@export var cell_size := 56
 @export var color_name := "red"
 
 var cell := Vector2i.ZERO
@@ -613,6 +1193,10 @@ var cell := Vector2i.ZERO
 
 func set_cell(value: Vector2i) -> void:
 	cell = value
+	refresh_layout()
+
+
+func refresh_layout() -> void:
 	position = _cell_to_world(cell)
 	queue_redraw()
 
@@ -623,17 +1207,19 @@ func set_color_name(value: String) -> void:
 
 
 func _draw() -> void:
+	var size := float(GameConfig.cell_size)
+
 	if texture != null:
-		draw_texture_rect(texture, Rect2(Vector2.ZERO, Vector2(cell_size, cell_size)), false)
+		draw_texture_rect(texture, Rect2(Vector2.ZERO, Vector2(size, size)), false)
 		return
 
-	_draw_key_icon(Vector2(cell_size, cell_size) / 2.0, GameConfig.get_key_color(color_name), 1.0)
+	_draw_key_icon(Vector2(size, size) / 2.0, GameConfig.get_key_color(color_name), size / 56.0)
 
 
 func _draw_key_icon(center: Vector2, key_color: Color, scale: float) -> void:
 	var head_radius := 8.0 * scale
 	var shaft_length := 20.0 * scale
-	var shaft_width := 3.0 * scale
+	var shaft_width := maxf(1.0, 3.0 * scale)
 	var tooth_size := 5.0 * scale
 
 	var head_center := center + Vector2(-shaft_length * 0.35, 0)
@@ -653,40 +1239,11 @@ func _draw_key_icon(center: Vector2, key_color: Color, scale: float) -> void:
 
 
 func _cell_to_world(value: Vector2i) -> Vector2:
-	return GameConfig.BOARD_OFFSET + Vector2(value.x * cell_size, value.y * cell_size)
+	return GameConfig.cell_to_world(value)
 </file>
 
 <file path="scripts/key.gd.uid">
 uid://wvgdnldrfyw7
-</file>
-
-<file path="scripts/level_difficulty_selector.gd">
-class_name LevelDifficultySelector
-extends RefCounted
-
-const MIN_DOOR_COUNT := 3
-const GENERATION_RETRY_COUNT := 20
-
-var rng := RandomNumberGenerator.new()
-
-
-func _init() -> void:
-	rng.randomize()
-
-
-func pick_level_settings() -> Dictionary:
-	var grid_size := rng.randi_range(GameConfig.MIN_GRID_SIZE, GameConfig.MAX_GRID_SIZE)
-	var max_door_request := grid_size * grid_size
-	var min_door_request := mini(maxi(MIN_DOOR_COUNT, GameConfig.KEY_COLOR_NAMES.size()), max_door_request)
-
-	return {
-		"grid_size": grid_size,
-		"door_count": rng.randi_range(min_door_request, max_door_request)
-	}
-</file>
-
-<file path="scripts/level_difficulty_selector.gd.uid">
-uid://byxl64117sik7
 </file>
 
 <file path="scripts/level_generator.gd">
@@ -701,6 +1258,8 @@ const DIRS: Array[Vector2i] = [
 ]
 
 const INVALID_CELL := Vector2i(-1, -1)
+const MAX_BITMASK_ENTITY_COUNT := 60
+
 
 const ENTITY_KEY := "key"
 const ENTITY_DOOR := "door"
@@ -727,6 +1286,10 @@ const DEFAULT_GENERATION_PROFILE := {
 	"min_floor_count": 4,
 	"min_extra_leaves": 3,
 	"main_path_door_spacing": 4,
+	"required_gate_min": 1,
+	"required_gate_max": 3,
+	"target_min_steps": 0,
+	"target_max_steps": 999999,
 	"require_unique_optimal_solution": true,
 	"solution_policy": "unique_optimal",
 	"decoy_door_extra_max": 2,
@@ -734,6 +1297,12 @@ const DEFAULT_GENERATION_PROFILE := {
 	"loose_key_max": 3,
 	"portal_pair_min": 1,
 	"portal_pair_max": 2,
+	"rail_min": 1,
+	"rail_max": 1,
+	"rail_port_min": 3,
+	"rail_port_max": 5,
+	"rail_lever_min": 1,
+	"rail_lever_max": 0,
 	"return_failure_report": false,
 	"future_bomb_enabled": false,
 	"future_rail_enabled": false
@@ -767,6 +1336,7 @@ class SolverState:
 
 
 class SolverContext:
+	var grid_size: int = 0
 	var floor_set: Dictionary = {}
 	var exit_cell: Vector2i = Vector2i.ZERO
 	var key_colors: Array[String] = []
@@ -776,6 +1346,13 @@ class SolverContext:
 	var door_cell_to_index: Dictionary = {}
 	var door_cell_to_color: Dictionary = {}
 	var portal_links: Dictionary = {}
+	var rail_ids: Array[String] = []
+	var rail_id_to_index: Dictionary = {}
+	var rail_data_by_index: Array[Dictionary] = []
+	var rail_cell_to_port: Dictionary = {}
+	var rail_blocked_cells: Dictionary = {}
+	var rail_lever_cell_to_rail_index: Dictionary = {}
+	var rail_initial_state_key: String = ""
 	var rules: Array = []
 
 
@@ -860,26 +1437,149 @@ class PortalMechanicRule:
 		return cell
 
 
-func generate(grid_size: int, door_count: int = 3, seed: int = -1, profile: Dictionary = {}) -> Dictionary:
+class RailLeverMechanicRule:
+	func can_enter(_context, _from_cell: Vector2i, _to_cell: Vector2i, _state) -> bool:
+		return true
+
+	func on_enter(context, cell: Vector2i, state) -> void:
+		if not context.rail_lever_cell_to_rail_index.has(cell):
+			return
+
+		var rail_index: int = int(context.rail_lever_cell_to_rail_index[cell])
+
+		if rail_index < 0 or rail_index >= context.rail_data_by_index.size():
+			return
+
+		var rail_data: Dictionary = context.rail_data_by_index[rail_index]
+		var connections: Array = rail_data.get("connections", [])
+
+		if connections.is_empty():
+			return
+
+		var rail_state_key: String = str(state.extra.get("rail_state_key", context.rail_initial_state_key))
+		var rail_states: Array[int] = _decode_rail_state_key(rail_state_key, context.rail_data_by_index.size())
+		rail_states[rail_index] = (rail_states[rail_index] + 1) % connections.size()
+		state.extra["rail_state_key"] = _encode_rail_state_array(rail_states)
+
+	func after_enter(_context, cell: Vector2i, _state) -> Vector2i:
+		return cell
+
+	func _decode_rail_state_key(value: String, expected_size: int) -> Array[int]:
+		var result: Array[int] = []
+		result.resize(expected_size)
+		result.fill(0)
+
+		if value == "":
+			return result
+
+		var parts := value.split(",", false)
+
+		for i in range(mini(parts.size(), expected_size)):
+			result[i] = int(parts[i])
+
+		return result
+
+	func _encode_rail_state_array(values: Array[int]) -> String:
+		var parts: Array[String] = []
+
+		for value in values:
+			parts.append(str(value))
+
+		return ",".join(parts)
+
+
+class RailMechanicRule:
+	func can_enter(context, _from_cell: Vector2i, to_cell: Vector2i, _state) -> bool:
+		return not context.rail_blocked_cells.has(to_cell)
+
+	func on_enter(_context, _cell: Vector2i, _state) -> void:
+		pass
+
+	func after_enter(context, cell: Vector2i, state) -> Vector2i:
+		if not context.rail_cell_to_port.has(cell):
+			return cell
+
+		var port_info: Dictionary = context.rail_cell_to_port[cell]
+		var rail_index: int = int(port_info["rail_index"])
+		var port_index: int = int(port_info["port_index"])
+
+		if rail_index < 0 or rail_index >= context.rail_data_by_index.size():
+			return cell
+
+		var rail_data: Dictionary = context.rail_data_by_index[rail_index]
+		var ports: Array[Vector2i] = rail_data["ports"]
+		var paths: Array = rail_data.get("paths", [])
+
+		if not paths.is_empty():
+			var path: Array = paths[0]
+
+			if path.size() >= 2 and port_index == 0:
+				return path[path.size() - 1]
+
+			return cell
+
+		var connections: Array = rail_data.get("connections", [])
+
+		if ports.size() < 2 or connections.is_empty():
+			return cell
+
+		var rail_state_key: String = str(state.extra.get("rail_state_key", context.rail_initial_state_key))
+		var rail_states: Array[int] = _decode_rail_state_key(rail_state_key, context.rail_data_by_index.size())
+		var active_state: int = wrapi(rail_states[rail_index], 0, connections.size())
+		var connection: Array = connections[active_state]
+
+		if connection.size() < 2:
+			return cell
+
+		var a: int = int(connection[0])
+		var b: int = int(connection[1])
+
+		if a < 0 or a >= ports.size() or b < 0 or b >= ports.size():
+			return cell
+
+		if port_index == a:
+			return ports[b]
+
+		if port_index == b:
+			return ports[a]
+
+		return cell
+
+	func _decode_rail_state_key(value: String, expected_size: int) -> Array[int]:
+		var result: Array[int] = []
+		result.resize(expected_size)
+		result.fill(0)
+
+		if value == "":
+			return result
+
+		var parts := value.split(",", false)
+
+		for i in range(mini(parts.size(), expected_size)):
+			result[i] = int(parts[i])
+
+		return result
+
+
+func generate(grid_size: int, seed: int = -1, profile: Dictionary = {}) -> Dictionary:
 	if seed >= 0:
 		rng.seed = seed
 	else:
 		rng.randomize()
 
-	var generation_profile := _make_generation_profile(grid_size, door_count, profile)
+	var generation_profile := _make_generation_profile(grid_size, profile)
 	var safe_grid_size: int = generation_profile["grid_size"]
-	var safe_door_count: int = generation_profile["door_count"]
 	var max_attempts: int = int(generation_profile["max_generation_attempts"])
 	var require_unique_optimal_solution: bool = bool(generation_profile["require_unique_optimal_solution"])
 	var fail_reasons := {}
 
 	for attempt in range(max_attempts):
-		var level := _try_generate(safe_grid_size, safe_door_count, generation_profile, fail_reasons)
+		var level := _try_generate(safe_grid_size, generation_profile, fail_reasons)
 
 		if level.is_empty():
 			continue
 
-		var solved := solve_level(level)
+		var solved := solve_level(level, require_unique_optimal_solution, false)
 
 		if not solved["found"]:
 			_record_fail(fail_reasons, "solver_no_solution")
@@ -889,14 +1589,23 @@ func generate(grid_size: int, door_count: int = 3, seed: int = -1, profile: Dict
 			_record_fail(fail_reasons, "not_unique_optimal_solution")
 			continue
 
-		level["optimal_steps"] = solved["steps"]
-		level["optimal_path"] = solved["path"]
-		level["optimal_solution_count"] = solved["optimal_solution_count"]
-		level["solution_count"] = solved["optimal_solution_count"] # Legacy alias.
+		if not _matches_step_target(solved, generation_profile):
+			_record_fail(fail_reasons, "step_target_mismatch")
+			continue
+
+		var solved_with_path := solve_level(level, false, true)
+
+		level["optimal_steps"] = solved_with_path["steps"]
+		level["optimal_path"] = solved_with_path["path"]
+		level["optimal_solution_count"] = solved_with_path["optimal_solution_count"]
+		level["solution_count"] = solved_with_path["optimal_solution_count"] # Legacy alias.
 		level["generation_debug"] = {
 			"attempt": attempt + 1,
 			"fail_reasons": fail_reasons.duplicate(),
-			"solution_policy": generation_profile["solution_policy"]
+			"solution_policy": generation_profile["solution_policy"],
+			"profile": generation_profile.duplicate(),
+			"solver_state_count": solved_with_path.get("state_count", 0),
+			"solver_max_queue_size": solved_with_path.get("max_queue_size", 0)
 		}
 		return level
 
@@ -914,7 +1623,6 @@ func generate(grid_size: int, door_count: int = 3, seed: int = -1, profile: Dict
 
 func _try_generate(
 	grid_size: int,
-	requested_door_count: int,
 	generation_profile: Dictionary,
 	fail_reasons: Dictionary
 ) -> Dictionary:
@@ -949,17 +1657,17 @@ func _try_generate(
 	var exit_cell := _farthest_leaf(start_cell, adjacency)
 	var main_path := _find_path(start_cell, exit_cell, adjacency)
 
-	var max_doors_by_path := int((main_path.size() - 4) / 3)
-	var door_count := mini(requested_door_count, mini(door_count_by_leaves, max_doors_by_path))
+	var spacing := int(generation_profile["main_path_door_spacing"])
+	var required_gate_count := _choose_required_gate_count(main_path.size(), door_count_by_leaves, generation_profile)
 
-	if door_count < 1:
+	if required_gate_count < 1:
 		_record_fail(fail_reasons, "main_path_too_short")
 		return {}
 
 	var path_set := _make_set(main_path)
-	var door_indices := _choose_door_indices(main_path.size(), door_count)
+	var door_indices := _choose_door_indices(main_path.size(), required_gate_count, spacing)
 
-	if door_indices.size() != door_count:
+	if door_indices.size() != required_gate_count:
 		_record_fail(fail_reasons, "door_indices_failed")
 		return {}
 
@@ -970,10 +1678,12 @@ func _try_generate(
 	var doors := {}
 	var keys := {}
 	var portals := {}
+	var rails := {}
+	var rail_levers := {}
 	var used_colors := {}
-	var required_colors := _make_door_color_sequence(door_count)
+	var required_colors := _make_door_color_sequence(required_gate_count)
 
-	for i in range(door_count):
+	for i in range(required_gate_count):
 		var door_index: int = door_indices[i]
 		var door_cell: Vector2i = main_path[door_index]
 		var color_name: String = required_colors[i]
@@ -984,7 +1694,7 @@ func _try_generate(
 
 	var previous_door_index := 0
 
-	for i in range(door_count):
+	for i in range(required_gate_count):
 		var door_index: int = door_indices[i]
 		var color_name: String = required_colors[i]
 		var zone_cells := _collect_zone_cells(main_path, adjacency, previous_door_index, door_index - 1, path_set)
@@ -1009,9 +1719,28 @@ func _try_generate(
 		used_colors,
 		start_cell,
 		exit_cell,
-		door_count,
+		required_gate_count,
 		generation_profile
 	)
+
+	if _count_portal_pairs(portals) < int(generation_profile["portal_pair_min"]):
+		_record_fail(fail_reasons, "portal_place_failed")
+		return {}
+
+	_add_rail_mechanics(
+		grid_size,
+		floor_cells,
+		occupied,
+		rails,
+		rail_levers,
+		start_cell,
+		exit_cell,
+		generation_profile
+	)
+
+	if rails.size() < int(generation_profile["rail_min"]):
+		_record_fail(fail_reasons, "rail_place_failed")
+		return {}
 
 	var wall_cells: Array[Vector2i] = []
 
@@ -1031,6 +1760,8 @@ func _try_generate(
 		keys,
 		doors,
 		portals,
+		rails,
+		rail_levers,
 		used_colors,
 		main_path,
 		door_indices,
@@ -1038,14 +1769,29 @@ func _try_generate(
 	)
 
 
-func solve_level(level: Dictionary) -> Dictionary:
-	var context: SolverContext = _build_solver_context(level)
+func solve_level(level: Dictionary, stop_after_multiple_optimal := false, store_path := true) -> Dictionary:
+	var context = _build_solver_context(level)
+
+	if context == null:
+		return {
+			"found": false,
+			"steps": -1,
+			"optimal_solution_count": 0,
+			"solution_count": 0,
+			"path": [],
+			"state_count": 0,
+			"max_queue_size": 0
+		}
+
 	var start_cell: Vector2i = _get_start_cell(level)
 	var start_key_counts: Array[int] = []
 	start_key_counts.resize(context.key_colors.size())
 	start_key_counts.fill(0)
 
 	var start_state := SolverState.new(start_cell, start_key_counts)
+
+	if context.rail_data_by_index.size() > 0:
+		start_state.extra["rail_state_key"] = context.rail_initial_state_key
 
 	# Preserve the original behavior: the start cell can grant an item, but start-cell portal
 	# movement is not automatically applied unless the player moves onto a portal later.
@@ -1062,12 +1808,18 @@ func solve_level(level: Dictionary) -> Dictionary:
 
 	distances[start_state_key] = 0
 	ways[start_state_key] = 1
-	previous_state[start_state_key] = ""
 	state_cell[start_state_key] = start_cell
 
+	if store_path:
+		previous_state[start_state_key] = ""
+
 	var best_steps := -1
+	var max_queue_size := 1
 
 	while head < queue.size():
+		if queue.size() > max_queue_size:
+			max_queue_size = queue.size()
+
 		var current_state = queue[head]
 		head += 1
 
@@ -1089,8 +1841,11 @@ func solve_level(level: Dictionary) -> Dictionary:
 			if not distances.has(next_state_key):
 				distances[next_state_key] = next_distance
 				ways[next_state_key] = ways[current_state_key]
-				previous_state[next_state_key] = current_state_key
 				state_cell[next_state_key] = next_state.cell
+
+				if store_path:
+					previous_state[next_state_key] = current_state_key
+
 				queue.append(next_state)
 
 				if next_state.cell == context.exit_cell and (best_steps == -1 or next_distance < best_steps):
@@ -1104,7 +1859,9 @@ func solve_level(level: Dictionary) -> Dictionary:
 			"steps": -1,
 			"optimal_solution_count": 0,
 			"solution_count": 0,
-			"path": []
+			"path": [],
+			"state_count": distances.size(),
+			"max_queue_size": max_queue_size
 		}
 
 	var optimal_solution_count := 0
@@ -1122,12 +1879,30 @@ func solve_level(level: Dictionary) -> Dictionary:
 		if best_exit_state_key == "":
 			best_exit_state_key = state_key
 
+		if stop_after_multiple_optimal and optimal_solution_count > 1:
+			return {
+				"found": true,
+				"steps": best_steps,
+				"optimal_solution_count": optimal_solution_count,
+				"solution_count": optimal_solution_count,
+				"path": [],
+				"state_count": distances.size(),
+				"max_queue_size": max_queue_size
+			}
+
+	var path: Array[Vector2i] = []
+
+	if store_path and best_exit_state_key != "":
+		path = _reconstruct_state_path(best_exit_state_key, previous_state, state_cell)
+
 	return {
 		"found": true,
 		"steps": best_steps,
 		"optimal_solution_count": optimal_solution_count,
 		"solution_count": optimal_solution_count, # Legacy alias.
-		"path": _reconstruct_state_path(best_exit_state_key, previous_state, state_cell)
+		"path": path,
+		"state_count": distances.size(),
+		"max_queue_size": max_queue_size
 	}
 
 
@@ -1157,12 +1932,15 @@ func _try_move_state(context, current_state, direction: Vector2i):
 
 func _build_solver_context(level: Dictionary):
 	var context := SolverContext.new()
+	context.grid_size = int(level.get("grid_size", 0))
 	context.floor_set = _make_set(_get_floor_cells(level))
 	context.exit_cell = _get_exit_cell(level)
 
 	var keys := _get_key_map(level)
 	var doors := _get_door_map(level)
 	var portals := _get_portal_map(level)
+	var rails := _get_rail_map(level)
+	var rail_levers := _get_rail_lever_map(level)
 
 	if level.has("key_colors"):
 		context.key_colors = _normalize_color_array(level["key_colors"])
@@ -1175,6 +1953,10 @@ func _build_solver_context(level: Dictionary):
 	var key_cells := keys.keys()
 	_sort_vector2i_array(key_cells)
 
+	if key_cells.size() > MAX_BITMASK_ENTITY_COUNT:
+		push_error("钥匙数量超过 bitmask 求解器上限：%d" % [key_cells.size()])
+		return null
+
 	for i in range(key_cells.size()):
 		var cell: Vector2i = key_cells[i]
 		context.key_cell_to_index[cell] = i
@@ -1182,6 +1964,10 @@ func _build_solver_context(level: Dictionary):
 
 	var door_cells := doors.keys()
 	_sort_vector2i_array(door_cells)
+
+	if door_cells.size() > MAX_BITMASK_ENTITY_COUNT:
+		push_error("门数量超过 bitmask 求解器上限：%d" % [door_cells.size()])
+		return null
 
 	for i in range(door_cells.size()):
 		var cell: Vector2i = door_cells[i]
@@ -1193,11 +1979,74 @@ func _build_solver_context(level: Dictionary):
 	else:
 		context.portal_links = _build_portal_links(portals)
 
-	# Rule order preserves current behavior: door cost -> key pickup -> portal movement.
+	var rail_ids: Array[String] = []
+
+	for rail_id in rails.keys():
+		rail_ids.append(str(rail_id))
+
+	rail_ids.sort()
+
+	if rail_ids.size() > MAX_BITMASK_ENTITY_COUNT:
+		push_error("轨道数量超过求解器上限：%d" % [rail_ids.size()])
+		return null
+
+	var initial_rail_states: Array[int] = []
+
+	for rail_id in rail_ids:
+		var raw_rail_data: Dictionary = rails[rail_id]
+		var ports: Array[Vector2i] = _normalize_rail_ports(raw_rail_data.get("ports", []))
+		var paths: Array = _normalize_rail_paths(raw_rail_data.get("paths", []))
+
+		if ports.size() < 2:
+			continue
+
+		var connections: Array = _normalize_rail_connections(raw_rail_data.get("connections", []), ports.size())
+
+		if connections.is_empty():
+			connections = _make_clockwise_rail_connections(ports.size())
+
+		if connections.is_empty():
+			continue
+
+		var rail_index: int = context.rail_data_by_index.size()
+		var rail_data: Dictionary = raw_rail_data.duplicate(true)
+		var initial_state: int = wrapi(int(rail_data.get("state", 0)), 0, connections.size())
+		rail_data["id"] = rail_id
+		rail_data["ports"] = ports
+		rail_data["paths"] = paths
+		rail_data["connections"] = connections
+		rail_data["state"] = initial_state
+		context.rail_id_to_index[rail_id] = rail_index
+		context.rail_ids.append(rail_id)
+		context.rail_data_by_index.append(rail_data)
+		initial_rail_states.append(initial_state)
+
+		for port_index in range(ports.size()):
+			context.rail_cell_to_port[ports[port_index]] = {
+				"rail_index": rail_index,
+				"port_index": port_index
+			}
+
+		for path in paths:
+			for path_index in range(1, path.size() - 1):
+				context.rail_blocked_cells[path[path_index]] = true
+
+	context.rail_initial_state_key = _encode_rail_state_array(initial_rail_states)
+
+	for lever_cell in rail_levers.keys():
+		var lever_data: Dictionary = rail_levers[lever_cell]
+		var target_rail_id: String = str(lever_data.get("target", ""))
+
+		if context.rail_id_to_index.has(target_rail_id):
+			context.rail_lever_cell_to_rail_index[lever_cell] = int(context.rail_id_to_index[target_rail_id])
+
+	# Rule order: door cost -> pickup -> switch state -> portal movement -> rail movement.
 	context.rules = [
 		DoorMechanicRule.new(),
 		KeyMechanicRule.new(),
-		PortalMechanicRule.new()
+		RailLeverMechanicRule.new(),
+		PortalMechanicRule.new(),
+		RailMechanicRule.new()
 	]
 
 	return context
@@ -1212,12 +2061,14 @@ func _build_level_data(
 	keys: Dictionary,
 	doors: Dictionary,
 	portals: Dictionary,
+	rails: Dictionary,
+	rail_levers: Dictionary,
 	used_colors: Dictionary,
 	main_path: Array,
 	door_indices: Array,
 	generation_profile: Dictionary
 ) -> Dictionary:
-	var key_colors := _sort_colors_by_config(used_colors)
+	var key_colors := _sort_colors_by_config(_collect_used_colors(keys, doors))
 	var portal_links := _build_portal_links(portals)
 	var terrain := {
 		"floor_cells": floor_cells,
@@ -1242,8 +2093,8 @@ func _build_level_data(
 			"future_bombs": {}
 		},
 		LAYER_MOVEMENT: {
-			"future_rails": {},
-			"future_rail_levers": {}
+			"rails": rails,
+			"rail_levers": rail_levers
 		},
 		LAYER_SPECIAL: {
 			"portals": portals
@@ -1255,14 +2106,15 @@ func _build_level_data(
 		"terrain": terrain,
 		"markers": markers,
 		"layers": layers,
-		"entities": _build_entities(keys, doors, portals),
-		"mechanic_schema_version": 2,
-		"mechanic_rules": [ENTITY_DOOR, ENTITY_KEY, ENTITY_PORTAL],
+		"entities": _build_entities(keys, doors, portals, rails, rail_levers),
+		"mechanic_schema_version": 4,
+		"mechanic_rules": [ENTITY_DOOR, ENTITY_KEY, ENTITY_PORTAL, ENTITY_RAIL, ENTITY_RAIL_LEVER],
 		"generation_profile": generation_profile.duplicate(),
 		"portal_links": portal_links,
 		"key_colors": key_colors,
 		"main_path": main_path,
 		"door_indices": door_indices,
+		"required_gate_count": door_indices.size(),
 		"optimal_steps": -1,
 		"optimal_path": [],
 		"optimal_solution_count": 0,
@@ -1275,18 +2127,30 @@ func _build_level_data(
 		"exit": exit_cell,
 		"keys": keys,
 		"doors": doors,
-		"portals": portals
+		"portals": portals,
+		"rails": rails,
+		"rail_levers": rail_levers
 	}
 
 
-func _build_entities(keys: Dictionary, doors: Dictionary, portals: Dictionary) -> Array[Dictionary]:
+func _build_entities(
+	keys: Dictionary,
+	doors: Dictionary,
+	portals: Dictionary,
+	rails: Dictionary,
+	rail_levers: Dictionary
+) -> Array[Dictionary]:
 	var result: Array[Dictionary] = []
 	var key_cells := keys.keys()
 	var door_cells := doors.keys()
 	var portal_cells := portals.keys()
+	var rail_ids := rails.keys()
+	var rail_lever_cells := rail_levers.keys()
 	_sort_vector2i_array(key_cells)
 	_sort_vector2i_array(door_cells)
 	_sort_vector2i_array(portal_cells)
+	rail_ids.sort()
+	_sort_vector2i_array(rail_lever_cells)
 
 	for cell in key_cells:
 		result.append({
@@ -1312,17 +2176,50 @@ func _build_entities(keys: Dictionary, doors: Dictionary, portals: Dictionary) -
 			"group": portals[cell]
 		})
 
+	for rail_id in rail_ids:
+		var rail_data: Dictionary = rails[rail_id]
+		result.append({
+			"type": ENTITY_RAIL,
+			"layer": LAYER_MOVEMENT,
+			"id": str(rail_id),
+			"ports": rail_data.get("ports", []),
+			"paths": rail_data.get("paths", []),
+			"connections": rail_data.get("connections", []),
+			"state": int(rail_data.get("state", 0)),
+			"color": str(rail_data.get("color", "cyan"))
+		})
+
+	for cell in rail_lever_cells:
+		var lever_data: Dictionary = rail_levers[cell]
+		result.append({
+			"type": ENTITY_RAIL_LEVER,
+			"layer": LAYER_MOVEMENT,
+			"cell": cell,
+			"target": str(lever_data.get("target", ""))
+		})
+
 	return result
 
 
-func _make_generation_profile(grid_size: int, door_count: int, overrides: Dictionary) -> Dictionary:
+func _make_generation_profile(grid_size: int, overrides: Dictionary) -> Dictionary:
 	var result := DEFAULT_GENERATION_PROFILE.duplicate(true)
 
 	for key in overrides.keys():
 		result[key] = overrides[key]
 
 	result["grid_size"] = clampi(grid_size, GameConfig.MIN_GRID_SIZE, GameConfig.MAX_GRID_SIZE)
-	result["door_count"] = maxi(3, door_count)
+	result["required_gate_min"] = maxi(1, int(result["required_gate_min"]))
+	result["required_gate_max"] = maxi(int(result["required_gate_min"]), int(result["required_gate_max"]))
+	result["main_path_door_spacing"] = maxi(1, int(result["main_path_door_spacing"]))
+	result["target_min_steps"] = maxi(0, int(result["target_min_steps"]))
+	result["target_max_steps"] = maxi(int(result["target_min_steps"]), int(result["target_max_steps"]))
+	result["min_floor_count"] = clampi(int(result["min_floor_count"]), 2, result["grid_size"] * result["grid_size"])
+	result["rail_min"] = maxi(0, int(result.get("rail_min", 0)))
+	result["rail_max"] = maxi(int(result["rail_min"]), int(result.get("rail_max", 0)))
+	result["rail_port_min"] = maxi(2, int(result.get("rail_port_min", 3)))
+	result["rail_port_max"] = maxi(int(result["rail_port_min"]), int(result.get("rail_port_max", 5)))
+	result["rail_lever_min"] = maxi(0, int(result.get("rail_lever_min", 0)))
+	result["rail_lever_max"] = maxi(int(result["rail_lever_min"]), int(result.get("rail_lever_max", 0)))
 
 	return result
 
@@ -1495,6 +2392,137 @@ func _add_decoy_mechanics(
 		portals[second_cell] = color_name
 		occupied[second_cell] = true
 		portal_colors[color_name] = true
+
+
+func _add_rail_mechanics(
+	grid_size: int,
+	floor_cells: Array[Vector2i],
+	occupied: Dictionary,
+	rails: Dictionary,
+	rail_levers: Dictionary,
+	start_cell: Vector2i,
+	exit_cell: Vector2i,
+	generation_profile: Dictionary
+) -> void:
+	var rail_target: int = rng.randi_range(int(generation_profile["rail_min"]), int(generation_profile["rail_max"]))
+	var floor_set := _make_set(floor_cells)
+	var adjacency := _build_adjacency(floor_set, grid_size)
+	var free_cells: Array[Vector2i] = []
+
+	for cell in floor_cells:
+		if occupied.has(cell) or cell == start_cell or cell == exit_cell:
+			continue
+
+		free_cells.append(cell)
+
+	for _rail_index in range(rail_target):
+		var min_path_size: int = int(generation_profile.get("rail_port_min", 3))
+		var max_path_size: int = int(generation_profile.get("rail_port_max", 5))
+
+		if free_cells.size() < min_path_size:
+			break
+
+		var path := _take_random_rail_path(free_cells, occupied, adjacency, min_path_size, max_path_size)
+
+		if path.size() < min_path_size:
+			break
+
+		for cell in path:
+			occupied[cell] = true
+
+		var rail_id: String = "rail_%d" % rails.size()
+		rails[rail_id] = {
+			"id": rail_id,
+			"ports": [path[0], path[path.size() - 1]],
+			"paths": [path],
+			"connections": [[0, 1]],
+			"state": 0,
+			"color": _pick_color_name()
+		}
+
+	if rails.is_empty():
+		return
+
+	if _rails_have_directed_paths(rails):
+		return
+
+	var lever_min: int = int(generation_profile["rail_lever_min"])
+	var lever_max: int = int(generation_profile["rail_lever_max"])
+	var lever_target: int = rng.randi_range(lever_min, lever_max)
+	var rail_ids := rails.keys()
+
+	for _i in range(lever_target):
+		if free_cells.is_empty():
+			break
+
+		var lever_cell: Vector2i = _take_random_free_cell(free_cells, occupied)
+
+		if lever_cell == INVALID_CELL:
+			break
+
+		var target_rail_id: String = str(rail_ids[rng.randi_range(0, rail_ids.size() - 1)])
+		rail_levers[lever_cell] = {
+			"target": target_rail_id
+		}
+		occupied[lever_cell] = true
+
+
+func _rails_have_directed_paths(rails: Dictionary) -> bool:
+	for rail_id in rails.keys():
+		var rail_data: Dictionary = rails[rail_id]
+
+		if not rail_data.get("paths", []).is_empty():
+			return true
+
+	return false
+
+
+func _take_random_rail_path(
+	free_cells: Array[Vector2i],
+	occupied: Dictionary,
+	adjacency: Dictionary,
+	min_path_size: int,
+	max_path_size: int
+) -> Array[Vector2i]:
+	var candidates := free_cells.duplicate()
+
+	while not candidates.is_empty():
+		var start_index := rng.randi_range(0, candidates.size() - 1)
+		var start_cell: Vector2i = candidates[start_index]
+		candidates.remove_at(start_index)
+
+		if occupied.has(start_cell):
+			continue
+
+		var path: Array[Vector2i] = [start_cell]
+		var visited := {}
+		visited[start_cell] = true
+		var target_size := rng.randi_range(min_path_size, max_path_size)
+
+		while path.size() < target_size:
+			var current_cell: Vector2i = path[path.size() - 1]
+			var next_candidates: Array[Vector2i] = []
+
+			for neighbor in adjacency[current_cell]:
+				if occupied.has(neighbor) or visited.has(neighbor):
+					continue
+
+				next_candidates.append(neighbor)
+
+			if next_candidates.is_empty():
+				break
+
+			var next_cell: Vector2i = next_candidates[rng.randi_range(0, next_candidates.size() - 1)]
+			path.append(next_cell)
+			visited[next_cell] = true
+
+		if path.size() >= min_path_size and not _are_orthogonal_neighbors(path[0], path[path.size() - 1]):
+			for cell in path:
+				free_cells.erase(cell)
+
+			return path
+
+	return []
 
 
 func _take_random_free_cell(cells: Array[Vector2i], occupied: Dictionary) -> Vector2i:
@@ -1679,25 +2707,60 @@ func _find_path(start_cell: Vector2i, target_cell: Vector2i, adjacency: Dictiona
 	return path
 
 
-func _choose_door_indices(path_size: int, door_count: int) -> Array[int]:
+func _choose_required_gate_count(
+	main_path_size: int,
+	max_gates_by_leaves: int,
+	generation_profile: Dictionary
+) -> int:
+	var spacing := maxi(1, int(generation_profile["main_path_door_spacing"]))
+	var min_index := 3
+	var max_index := main_path_size - 2
+	var usable_count := max_index - min_index + 1
+
+	if usable_count <= 0:
+		return 0
+
+	var max_gates_by_path := maxi(1, int(ceil(float(usable_count) / float(spacing))))
+	var max_gate_count := mini(max_gates_by_leaves, max_gates_by_path)
+
+	if max_gate_count < 1:
+		return 0
+
+	var requested_min := int(generation_profile["required_gate_min"])
+	var requested_max := int(generation_profile["required_gate_max"])
+	var safe_min := clampi(requested_min, 1, max_gate_count)
+	var safe_max := clampi(requested_max, safe_min, max_gate_count)
+
+	return rng.randi_range(safe_min, safe_max)
+
+
+func _choose_door_indices(path_size: int, door_count: int, spacing: int) -> Array[int]:
 	var result: Array[int] = []
 	var min_index := 3
 	var max_index := path_size - 2
 
-	if max_index <= min_index:
+	if max_index < min_index or door_count < 1:
 		return result
 
+	var slots: Array[int] = []
+	var index := min_index
+
+	while index <= max_index:
+		slots.append(index)
+		index += spacing
+
+	if slots.size() < door_count:
+		return result
+
+	if door_count == 1:
+		result.append(slots[int(slots.size() / 2)])
+		return result
+
+	var last_slot_index := slots.size() - 1
+
 	for i in range(door_count):
-		var t := float(i + 1) / float(door_count + 1)
-		var index := min_index + int(round(float(max_index - min_index) * t))
-
-		while result.has(index) and index < max_index:
-			index += 1
-
-		if result.has(index):
-			return []
-
-		result.append(index)
+		var slot_position := int(round(float(i) * float(last_slot_index) / float(door_count - 1)))
+		result.append(slots[slot_position])
 
 	result.sort()
 	return result
@@ -1776,20 +2839,54 @@ func _build_portal_links(portals: Dictionary) -> Dictionary:
 	return links
 
 
-func _make_state_key(context, state) -> String:
-	var key_count_parts: Array[String] = []
+func _count_portal_pairs(portals: Dictionary) -> int:
+	var groups := {}
 
-	for count in state.key_counts:
-		key_count_parts.append(str(count))
+	for portal_cell in portals.keys():
+		var portal_group: String = portals[portal_cell]
 
-	return "%d,%d|%s|%d|%d|%s" % [
-		state.cell.x,
-		state.cell.y,
-		",".join(key_count_parts),
+		if not groups.has(portal_group):
+			groups[portal_group] = 0
+
+		groups[portal_group] = int(groups[portal_group]) + 1
+
+	var result := 0
+
+	for portal_group in groups.keys():
+		if int(groups[portal_group]) >= 2:
+			result += 1
+
+	return result
+
+
+func _make_state_key(context: SolverContext, state: SolverState) -> String:
+	var cell_id: int = state.cell.y * context.grid_size + state.cell.x
+	var key_counts_signature: String = _encode_key_counts(state.key_counts)
+
+	if state.extra.is_empty():
+		return "%d|%s|%d|%d" % [
+			cell_id,
+			key_counts_signature,
+			state.picked_key_mask,
+			state.opened_door_mask
+		]
+
+	return "%d|%s|%d|%d|%s" % [
+		cell_id,
+		key_counts_signature,
 		state.picked_key_mask,
 		state.opened_door_mask,
 		_make_extra_state_signature(context, state.extra)
 	]
+
+
+func _encode_key_counts(key_counts: Array[int]) -> String:
+	var parts: Array[String] = []
+
+	for count in key_counts:
+		parts.append(str(count))
+
+	return ",".join(parts)
 
 
 func _make_extra_state_signature(_context, extra: Dictionary) -> String:
@@ -1868,6 +2965,108 @@ func _get_portal_map(level: Dictionary) -> Dictionary:
 	return _entities_to_cell_map(level.get("entities", []), ENTITY_PORTAL, "group")
 
 
+func _get_rail_map(level: Dictionary) -> Dictionary:
+	if level.has("rails"):
+		return level["rails"]
+
+	if level.has("layers") and level["layers"].has(LAYER_MOVEMENT):
+		var movement_layer: Dictionary = level["layers"][LAYER_MOVEMENT]
+
+		if movement_layer.has("rails"):
+			return movement_layer["rails"]
+
+	return {}
+
+
+func _get_rail_lever_map(level: Dictionary) -> Dictionary:
+	if level.has("rail_levers"):
+		return level["rail_levers"]
+
+	if level.has("layers") and level["layers"].has(LAYER_MOVEMENT):
+		var movement_layer: Dictionary = level["layers"][LAYER_MOVEMENT]
+
+		if movement_layer.has("rail_levers"):
+			return movement_layer["rail_levers"]
+
+	return {}
+
+
+func _normalize_rail_ports(raw_ports: Array) -> Array[Vector2i]:
+	var result: Array[Vector2i] = []
+
+	for port in raw_ports:
+		if port is Vector2i:
+			result.append(port)
+
+	return result
+
+
+func _normalize_rail_paths(raw_paths: Array) -> Array:
+	var result: Array = []
+
+	for raw_path in raw_paths:
+		if not (raw_path is Array):
+			continue
+
+		var path: Array[Vector2i] = []
+
+		for cell in raw_path:
+			if cell is Vector2i:
+				path.append(cell)
+
+		if path.size() >= 2:
+			result.append(path)
+
+	return result
+
+
+func _normalize_rail_connections(raw_connections: Array, port_count: int) -> Array:
+	var result: Array = []
+
+	for raw_connection in raw_connections:
+		if not (raw_connection is Array):
+			continue
+
+		var connection: Array = raw_connection as Array
+
+		if connection.size() < 2:
+			continue
+
+		var a: int = int(connection[0])
+		var b: int = int(connection[1])
+
+		if a == b:
+			continue
+
+		if a < 0 or a >= port_count or b < 0 or b >= port_count:
+			continue
+
+		result.append([a, b])
+
+	return result
+
+
+func _make_clockwise_rail_connections(port_count: int) -> Array:
+	var result: Array = []
+
+	if port_count < 2:
+		return result
+
+	for i in range(port_count):
+		result.append([i, (i + 1) % port_count])
+
+	return result
+
+
+func _encode_rail_state_array(values: Array[int]) -> String:
+	var parts: Array[String] = []
+
+	for value in values:
+		parts.append(str(value))
+
+	return ",".join(parts)
+
+
 func _entities_to_cell_map(entities: Array, target_type: String, value_key: String) -> Dictionary:
 	var result := {}
 
@@ -1902,6 +3101,30 @@ func _collect_key_colors(keys: Dictionary, doors: Dictionary) -> Array[String]:
 		color_set[doors[cell]] = true
 
 	return _sort_colors_by_config(color_set)
+
+
+func _collect_used_colors(keys: Dictionary, doors: Dictionary) -> Dictionary:
+	var result := {}
+
+	for cell in keys.keys():
+		result[keys[cell]] = true
+
+	for cell in doors.keys():
+		result[doors[cell]] = true
+
+	return result
+
+
+func _matches_step_target(solved: Dictionary, profile: Dictionary) -> bool:
+	var steps := int(solved["steps"])
+
+	if steps < int(profile["target_min_steps"]):
+		return false
+
+	if steps > int(profile["target_max_steps"]):
+		return false
+
+	return true
 
 
 func _sort_colors_by_config(color_set: Dictionary) -> Array[String]:
@@ -1967,6 +3190,11 @@ uid://cxog573u2i0hk
 <file path="scripts/main.gd">
 extends Node2D
 
+const MobileControlsScript := preload("res://scripts/ui/mobile_controls.gd")
+const RailScript := preload("res://scripts/rail.gd")
+const RailLeverScript := preload("res://scripts/rail_lever.gd")
+
+@export var show_mobile_controls := true
 @export var wall_scene: PackedScene
 @export var door_scene: PackedScene
 @export var key_scene: PackedScene
@@ -1981,7 +3209,7 @@ extends Node2D
 @onready var hud := $HUD
 
 var grid_size := 5
-var current_floor := 1
+var current_floor := 0
 var total_moves := 0
 var floor_moves := 0
 var optimal_steps := -1
@@ -1990,18 +3218,48 @@ var wall_cells: Array[Vector2i] = []
 var key_cells := {}
 var door_cells := {}
 var portal_cells := {}
+var rail_cells := {}
+var rail_lever_cells := {}
+var rail_states := {}
+var rail_blocked_cells := {}
 var floor_cells: Array[Vector2i] = []
 
-var level_generator := LevelGenerator.new()
-var difficulty_selector := LevelDifficultySelector.new()
+var has_active_floor := false
+var is_generating_floor := false
+var pending_floor_number := 0
+var generation_thread: Thread
+var block_floor_advance_until_player_leaves_exit := false
+
+var loading_layer: CanvasLayer
+var loading_root: Control
+var loading_spinner_label: Label
+var loading_message_label: Label
+var loading_frames: Array[String] = ["◜", "◠", "◝", "◞", "◡", "◟"]
+var loading_frame_index := 0
+var loading_frame_elapsed := 0.0
+
+var mobile_controls
+var rails: Node2D
+var rail_lever_nodes: Node2D
 
 
 func _ready() -> void:
 	randomize()
-	_start_new_floor()
+	_ensure_movement_containers()
+	player.z_index = 10
+	get_viewport().size_changed.connect(_on_viewport_size_changed)
+	_create_mobile_controls()
+	_create_loading_overlay()
+	_begin_generate_floor(1)
 
 
-func _process(_delta: float) -> void:
+func _process(delta: float) -> void:
+	_update_loading_overlay(delta)
+	_poll_generation_thread()
+
+	if is_generating_floor:
+		return
+
 	if _try_advance_floor_if_on_exit():
 		return
 
@@ -2020,33 +3278,158 @@ func _process(_delta: float) -> void:
 		_try_move_player(direction)
 
 
-func _start_new_floor() -> void:
-	var level := {}
+func _exit_tree() -> void:
+	if generation_thread != null and generation_thread.is_started():
+		generation_thread.wait_to_finish()
 
-	for _attempt in range(LevelDifficultySelector.GENERATION_RETRY_COUNT):
-		var settings := difficulty_selector.pick_level_settings()
-		level = level_generator.generate(settings["grid_size"], settings["door_count"])
 
-		if not level.is_empty():
-			break
+func _on_viewport_size_changed() -> void:
+	_update_board_layout()
+	_refresh_existing_floor_layout()
+	queue_redraw()
 
-	if level.is_empty():
+
+func _update_board_layout() -> void:
+	var reserved_bottom := 0.0
+
+	if mobile_controls != null and mobile_controls.has_method("get_reserved_bottom_height"):
+		reserved_bottom = float(mobile_controls.get_reserved_bottom_height())
+
+	GameConfig.update_board_layout(get_viewport_rect().size, grid_size, reserved_bottom)
+
+
+func _refresh_existing_floor_layout() -> void:
+	if not has_active_floor:
 		return
 
+	if player != null and player.has_method("refresh_layout"):
+		player.refresh_layout()
+
+	if stairs != null and stairs.has_method("refresh_layout"):
+		stairs.refresh_layout()
+
+	_refresh_container_layout(walls)
+	_refresh_container_layout(doors)
+	_refresh_container_layout(keys)
+	_refresh_container_layout(portals)
+	_refresh_container_layout(rails)
+	_refresh_container_layout(rail_lever_nodes)
+
+
+func _refresh_container_layout(container: Node) -> void:
+	if container == null:
+		return
+
+	for child in container.get_children():
+		if child.has_method("refresh_layout"):
+			child.refresh_layout()
+
+
+func _begin_generate_floor(floor_number: int) -> void:
+	if is_generating_floor:
+		return
+
+	pending_floor_number = floor_number
+	is_generating_floor = true
+	_set_mobile_controls_enabled(false)
+	_show_loading_overlay("正在生成第 %d 层..." % floor_number)
+
+	generation_thread = Thread.new()
+	var start_error: int = generation_thread.start(Callable(self, "_generate_floor_thread").bind(floor_number))
+
+	if start_error != OK:
+		push_warning("无法启动后台生成线程，改为同步生成。")
+		generation_thread = null
+		var result: Dictionary = _generate_floor_thread(floor_number)
+		is_generating_floor = false
+		_finish_generation_result(result)
+
+
+func _generate_floor_thread(floor_number: int) -> Dictionary:
+	var worker_generator := LevelGenerator.new()
+	var worker_request_selector := LevelRequestSelector.new()
+
+	for attempt_index in range(LevelRequestSelector.GENERATION_RETRY_COUNT):
+		var request: Dictionary = worker_request_selector.pick_level_request(floor_number)
+		var level: Dictionary = worker_generator.generate(
+			int(request["grid_size"]),
+			-1,
+			request["profile"]
+		)
+
+		if not level.is_empty():
+			return {
+				"success": true,
+				"floor_number": floor_number,
+				"level": level,
+				"attempts": attempt_index + 1
+			}
+
+	return {
+		"success": false,
+		"floor_number": floor_number,
+		"level": {},
+		"attempts": LevelRequestSelector.GENERATION_RETRY_COUNT
+	}
+
+
+func _poll_generation_thread() -> void:
+	if generation_thread == null:
+		return
+
+	if generation_thread.is_alive():
+		return
+
+	var result: Dictionary = generation_thread.wait_to_finish()
+	generation_thread = null
+	is_generating_floor = false
+	_finish_generation_result(result)
+
+
+func _finish_generation_result(result: Dictionary) -> void:
+	if bool(result.get("success", false)):
+		_apply_generated_floor(int(result["floor_number"]), result["level"])
+		_hide_loading_overlay()
+		_set_mobile_controls_enabled(true)
+		block_floor_advance_until_player_leaves_exit = false
+		return
+
+	_hide_loading_overlay()
+
+	if has_active_floor:
+		_set_mobile_controls_enabled(true)
+		block_floor_advance_until_player_leaves_exit = true
+		push_warning("下一层生成失败，保留当前层。")
+		_update_hud()
+		return
+
+	_set_mobile_controls_enabled(false)
+	push_error("初始楼层生成失败。请降低难度参数或增加生成尝试次数。")
+
+
+func _apply_generated_floor(floor_number: int, level: Dictionary) -> void:
 	_clear_floor_entities()
-	grid_size = level["grid_size"]
+	current_floor = floor_number
+	grid_size = int(level["grid_size"])
 	floor_cells.assign(level["floor_cells"])
 	wall_cells.assign(level["walls"])
 	key_cells = level["keys"]
 	door_cells = level["doors"]
 	portal_cells = level["portals"]
-	optimal_steps = level["optimal_steps"]
+	rail_cells = level.get("rails", {})
+	rail_lever_cells = level.get("rail_levers", {})
+	rail_states = _make_initial_rail_states(rail_cells)
+	rail_blocked_cells = _make_rail_blocked_cells(rail_cells)
+	optimal_steps = int(level["optimal_steps"])
+
+	_update_board_layout()
 
 	player.set_cell(level["start"])
 	player.clear_keys()
 	stairs.set_cell(level["exit"])
 
 	floor_moves = 0
+	has_active_floor = true
 	_spawn_floor_entities()
 
 	_update_hud()
@@ -2054,12 +3437,18 @@ func _start_new_floor() -> void:
 
 
 func _try_move_player(direction: Vector2i) -> void:
+	if not has_active_floor or is_generating_floor:
+		return
+
 	var next_cell: Vector2i = player.cell + direction
 
 	if not _is_inside_grid(next_cell):
 		return
 
 	if wall_cells.has(next_cell):
+		return
+
+	if rail_blocked_cells.has(next_cell):
 		return
 
 	if door_cells.has(next_cell):
@@ -2072,7 +3461,9 @@ func _try_move_player(direction: Vector2i) -> void:
 		_open_door(next_cell)
 
 	player.set_cell(next_cell)
+	_try_activate_rail_lever()
 	_try_use_portal()
+	_try_use_rail()
 	total_moves += 1
 	floor_moves += 1
 
@@ -2092,11 +3483,17 @@ func _update_hud() -> void:
 
 
 func _try_advance_floor_if_on_exit() -> bool:
-	if player.cell != stairs.cell:
+	if not has_active_floor or is_generating_floor:
 		return false
 
-	current_floor += 1
-	_start_new_floor()
+	if player.cell != stairs.cell:
+		block_floor_advance_until_player_leaves_exit = false
+		return false
+
+	if block_floor_advance_until_player_leaves_exit:
+		return false
+
+	_begin_generate_floor(current_floor + 1)
 	return true
 
 
@@ -2105,16 +3502,18 @@ func _draw() -> void:
 
 
 func _draw_grid() -> void:
+	var size := float(GameConfig.cell_size)
+
 	for cell in floor_cells:
 		var cell_pos := _cell_to_world(cell)
-		var rect := Rect2(cell_pos, Vector2(GameConfig.CELL_SIZE, GameConfig.CELL_SIZE))
+		var rect := Rect2(cell_pos, Vector2(size, size))
 
 		draw_rect(rect, Color(0.18, 0.18, 0.20), true)
-		draw_rect(rect, Color(0.65, 0.65, 0.70), false, 2.0)
+		draw_rect(rect, Color(0.65, 0.65, 0.70), false, maxf(1.0, size * 0.035))
 
 
 func _cell_to_world(cell: Vector2i) -> Vector2:
-	return GameConfig.BOARD_OFFSET + Vector2(cell.x * GameConfig.CELL_SIZE, cell.y * GameConfig.CELL_SIZE)
+	return GameConfig.cell_to_world(cell)
 
 
 func _spawn_floor_entities() -> void:
@@ -2141,9 +3540,11 @@ func _spawn_floor_entities() -> void:
 		portal.set_color_name(portal_cells[portal_cell])
 		portal.set_cell(portal_cell)
 
+	_spawn_rail_entities()
+
 
 func _clear_floor_entities() -> void:
-	for container in [walls, doors, keys, portals]:
+	for container in [walls, doors, keys, portals, rails, rail_lever_nodes]:
 		for child in container.get_children():
 			child.queue_free()
 
@@ -2161,6 +3562,232 @@ func _try_use_portal() -> void:
 		if portal_cells[portal_cell] == portal_color:
 			player.set_cell(portal_cell)
 			return
+
+
+func _try_activate_rail_lever() -> void:
+	if not rail_lever_cells.has(player.cell):
+		return
+
+	var lever_data: Dictionary = rail_lever_cells[player.cell]
+	var target_rail_id: String = str(lever_data.get("target", ""))
+
+	if target_rail_id == "" or not rail_states.has(target_rail_id):
+		return
+
+	_advance_rail_state(target_rail_id)
+	_refresh_rail_visuals()
+
+
+func _try_use_rail() -> void:
+	var port_info: Dictionary = _get_rail_port_info(player.cell)
+
+	if port_info.is_empty():
+		return
+
+	var rail_id: String = str(port_info["rail_id"])
+	var port_index: int = int(port_info["port_index"])
+
+	if not rail_cells.has(rail_id):
+		return
+
+	var rail_data: Dictionary = rail_cells[rail_id]
+	var ports: Array[Vector2i] = _get_rail_ports(rail_data)
+	var paths: Array = _get_rail_paths(rail_data)
+
+	if not paths.is_empty():
+		var path: Array = paths[0]
+
+		if path.size() >= 2 and port_index == 0:
+			player.set_cell(path[path.size() - 1])
+
+		return
+
+	var connections: Array = _get_rail_connections(rail_data, ports.size())
+
+	if ports.size() < 2 or connections.is_empty():
+		return
+
+	var state: int = wrapi(int(rail_states.get(rail_id, int(rail_data.get("state", 0)))), 0, connections.size())
+	var connection: Array = connections[state]
+
+	if connection.size() < 2:
+		return
+
+	var a: int = int(connection[0])
+	var b: int = int(connection[1])
+
+	if a < 0 or a >= ports.size() or b < 0 or b >= ports.size():
+		return
+
+	if port_index == a:
+		player.set_cell(ports[b])
+		return
+
+	if port_index == b:
+		player.set_cell(ports[a])
+		return
+
+
+func _get_rail_port_info(cell: Vector2i) -> Dictionary:
+	for rail_id in rail_cells.keys():
+		var rail_data: Dictionary = rail_cells[rail_id]
+		var ports: Array[Vector2i] = _get_rail_ports(rail_data)
+
+		for port_index in range(ports.size()):
+			if ports[port_index] == cell:
+				return {
+					"rail_id": str(rail_id),
+					"port_index": port_index
+				}
+
+	return {}
+
+
+func _get_rail_ports(rail_data: Dictionary) -> Array[Vector2i]:
+	var result: Array[Vector2i] = []
+	var raw_ports: Array = rail_data.get("ports", [])
+
+	for port in raw_ports:
+		if port is Vector2i:
+			result.append(port)
+
+	return result
+
+
+func _get_rail_paths(rail_data: Dictionary) -> Array:
+	var result: Array = []
+	var raw_paths: Array = rail_data.get("paths", [])
+
+	for raw_path in raw_paths:
+		if not (raw_path is Array):
+			continue
+
+		var path: Array[Vector2i] = []
+
+		for cell in raw_path:
+			if cell is Vector2i:
+				path.append(cell)
+
+		if path.size() >= 2:
+			result.append(path)
+
+	return result
+
+
+func _get_rail_connections(rail_data: Dictionary, port_count: int) -> Array:
+	var result: Array = []
+	var raw_connections: Array = rail_data.get("connections", [])
+
+	for raw_connection in raw_connections:
+		if not (raw_connection is Array):
+			continue
+
+		var connection: Array = raw_connection as Array
+
+		if connection.size() < 2:
+			continue
+
+		var a: int = int(connection[0])
+		var b: int = int(connection[1])
+
+		if a == b:
+			continue
+
+		if a < 0 or a >= port_count or b < 0 or b >= port_count:
+			continue
+
+		result.append([a, b])
+
+	if result.is_empty() and port_count >= 2:
+		for i in range(port_count):
+			result.append([i, (i + 1) % port_count])
+
+	return result
+
+
+func _make_rail_blocked_cells(rails_data: Dictionary) -> Dictionary:
+	var result := {}
+
+	for rail_id in rails_data.keys():
+		var rail_data: Dictionary = rails_data[rail_id]
+		var paths: Array = _get_rail_paths(rail_data)
+
+		for path in paths:
+			for path_index in range(1, path.size() - 1):
+				result[path[path_index]] = true
+
+	return result
+
+
+func _advance_rail_state(rail_id: String) -> void:
+	if not rail_cells.has(rail_id):
+		return
+
+	var rail_data: Dictionary = rail_cells[rail_id]
+	var ports: Array[Vector2i] = _get_rail_ports(rail_data)
+	var connections: Array = _get_rail_connections(rail_data, ports.size())
+
+	if connections.is_empty():
+		return
+
+	rail_states[rail_id] = (int(rail_states.get(rail_id, int(rail_data.get("state", 0)))) + 1) % connections.size()
+
+
+func _make_initial_rail_states(rails_data: Dictionary) -> Dictionary:
+	var result := {}
+
+	for rail_id in rails_data.keys():
+		var rail_data: Dictionary = rails_data[rail_id]
+		var ports: Array[Vector2i] = _get_rail_ports(rail_data)
+		var connections: Array = _get_rail_connections(rail_data, ports.size())
+		var state: int = int(rail_data.get("state", 0))
+
+		if not connections.is_empty():
+			state = wrapi(state, 0, connections.size())
+
+		result[str(rail_id)] = state
+
+	return result
+
+
+func _spawn_rail_entities() -> void:
+	if rails == null or rail_lever_nodes == null:
+		return
+
+	for rail_id in rail_cells.keys():
+		var rail_data: Dictionary = rail_cells[rail_id]
+		var ports: Array[Vector2i] = _get_rail_ports(rail_data)
+		var paths: Array = _get_rail_paths(rail_data)
+		var connections: Array = _get_rail_connections(rail_data, ports.size())
+		var state: int = int(rail_states.get(str(rail_id), int(rail_data.get("state", 0))))
+		var color_name: String = str(rail_data.get("color", "cyan"))
+		var rail = RailScript.new()
+		rails.add_child(rail)
+		rail.set_rail_data(str(rail_id), ports, connections, state, color_name, paths)
+
+	for lever_cell in rail_lever_cells.keys():
+		var lever_data: Dictionary = rail_lever_cells[lever_cell]
+		var target_rail_id: String = str(lever_data.get("target", ""))
+		var state: int = int(rail_states.get(target_rail_id, 0))
+		var lever = RailLeverScript.new()
+		rail_lever_nodes.add_child(lever)
+		lever.set_target_rail_id(target_rail_id)
+		lever.set_state(state)
+		lever.set_cell(lever_cell)
+
+
+func _refresh_rail_visuals() -> void:
+	if rails != null:
+		for rail in rails.get_children():
+			if rail.has_method("set_state"):
+				var rail_id: String = str(rail.rail_id)
+				rail.set_state(int(rail_states.get(rail_id, 0)))
+
+	if rail_lever_nodes != null:
+		for lever in rail_lever_nodes.get_children():
+			if lever.has_method("set_state"):
+				var target_rail_id: String = str(lever.target_rail_id)
+				lever.set_state(int(rail_states.get(target_rail_id, 0)))
 
 
 func _try_pick_up_key() -> void:
@@ -2184,6 +3811,133 @@ func _open_door(cell: Vector2i) -> void:
 		if door.cell == cell:
 			door.queue_free()
 			break
+
+
+func move_player_from_ui(direction: Vector2i) -> void:
+	_try_move_player(direction)
+
+
+func _ensure_movement_containers() -> void:
+	var existing_rails := get_node_or_null("Rails")
+
+	if existing_rails is Node2D:
+		rails = existing_rails as Node2D
+	else:
+		rails = Node2D.new()
+		rails.name = "Rails"
+		add_child(rails)
+
+	rails.z_index = 1
+
+	var existing_rail_levers := get_node_or_null("RailLevers")
+
+	if existing_rail_levers is Node2D:
+		rail_lever_nodes = existing_rail_levers as Node2D
+	else:
+		rail_lever_nodes = Node2D.new()
+		rail_lever_nodes.name = "RailLevers"
+		add_child(rail_lever_nodes)
+
+	rail_lever_nodes.z_index = 2
+
+
+func _create_mobile_controls() -> void:
+	mobile_controls = MobileControlsScript.new()
+	mobile_controls.visible = show_mobile_controls
+	mobile_controls.move_requested.connect(move_player_from_ui)
+	add_child(mobile_controls)
+	mobile_controls.set_input_enabled(false)
+
+
+func _set_mobile_controls_enabled(enabled: bool) -> void:
+	if mobile_controls == null:
+		return
+
+	if mobile_controls.has_method("set_input_enabled"):
+		mobile_controls.set_input_enabled(enabled)
+
+
+func _create_loading_overlay() -> void:
+	loading_layer = CanvasLayer.new()
+	loading_layer.layer = 100
+	add_child(loading_layer)
+
+	loading_root = Control.new()
+	loading_root.visible = false
+	loading_root.mouse_filter = Control.MOUSE_FILTER_STOP
+	loading_root.anchor_right = 1.0
+	loading_root.anchor_bottom = 1.0
+	loading_layer.add_child(loading_root)
+
+	var background := ColorRect.new()
+	background.color = Color(0.0, 0.0, 0.0, 0.45)
+	background.anchor_right = 1.0
+	background.anchor_bottom = 1.0
+	loading_root.add_child(background)
+
+	var box := VBoxContainer.new()
+	box.anchor_left = 0.5
+	box.anchor_top = 0.5
+	box.anchor_right = 0.5
+	box.anchor_bottom = 0.5
+	box.offset_left = -180.0
+	box.offset_top = -90.0
+	box.offset_right = 180.0
+	box.offset_bottom = 90.0
+	box.alignment = BoxContainer.ALIGNMENT_CENTER
+	box.add_theme_constant_override("separation", 10)
+	loading_root.add_child(box)
+
+	loading_spinner_label = Label.new()
+	loading_spinner_label.text = loading_frames[0]
+	loading_spinner_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	loading_spinner_label.add_theme_font_size_override("font_size", 64)
+	box.add_child(loading_spinner_label)
+
+	loading_message_label = Label.new()
+	loading_message_label.text = "正在生成关卡..."
+	loading_message_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	loading_message_label.add_theme_font_size_override("font_size", 22)
+	box.add_child(loading_message_label)
+
+	var hint_label := Label.new()
+	hint_label.text = "正在搜索可解且难度合适的地图"
+	hint_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	hint_label.add_theme_font_size_override("font_size", 15)
+	hint_label.modulate = Color(1.0, 1.0, 1.0, 0.72)
+	box.add_child(hint_label)
+
+
+func _show_loading_overlay(message: String) -> void:
+	if loading_root == null:
+		return
+
+	loading_message_label.text = message
+	loading_frame_index = 0
+	loading_frame_elapsed = 0.0
+	loading_spinner_label.text = loading_frames[loading_frame_index]
+	loading_root.visible = true
+
+
+func _hide_loading_overlay() -> void:
+	if loading_root == null:
+		return
+
+	loading_root.visible = false
+
+
+func _update_loading_overlay(delta: float) -> void:
+	if loading_root == null or not loading_root.visible:
+		return
+
+	loading_frame_elapsed += delta
+
+	if loading_frame_elapsed < 0.08:
+		return
+
+	loading_frame_elapsed = 0.0
+	loading_frame_index = (loading_frame_index + 1) % loading_frames.size()
+	loading_spinner_label.text = loading_frames[loading_frame_index]
 </file>
 
 <file path="scripts/main.gd.uid">
@@ -2194,7 +3948,6 @@ uid://cjme1vk260y2h
 extends Node2D
 
 @export var texture: Texture2D
-@export var cell_size := 56
 @export var color := Color(0.1, 0.45, 1.0)
 
 var cell := Vector2i.ZERO
@@ -2203,16 +3956,21 @@ var owned_key_counts := {}
 
 func set_cell(value: Vector2i) -> void:
 	cell = value
+	refresh_layout()
+
+
+func refresh_layout() -> void:
 	position = _cell_to_world(cell)
 	queue_redraw()
 
 
 func _draw() -> void:
-	var center := Vector2(cell_size, cell_size) / 2.0
-	var radius := cell_size * 0.32
+	var size := float(GameConfig.cell_size)
+	var center := Vector2(size, size) / 2.0
+	var radius := size * 0.32
 
 	if texture != null:
-		draw_texture_rect(texture, Rect2(Vector2.ZERO, Vector2(cell_size, cell_size)), false)
+		draw_texture_rect(texture, Rect2(Vector2.ZERO, Vector2(size, size)), false)
 	else:
 		draw_circle(center, radius, color)
 
@@ -2226,7 +3984,6 @@ func clear_keys() -> void:
 
 func add_key(color_name: String) -> void:
 	owned_key_counts[color_name] = int(owned_key_counts.get(color_name, 0)) + 1
-
 	queue_redraw()
 
 
@@ -2263,6 +4020,7 @@ func get_key_text() -> String:
 
 func _draw_owned_key_icons(player_center: Vector2, player_radius: float) -> void:
 	var icon_index := 0
+	var size_scale := float(GameConfig.cell_size) / 56.0
 
 	for color_name in owned_key_counts.keys():
 		var key_color := GameConfig.get_key_color(color_name)
@@ -2270,18 +4028,18 @@ func _draw_owned_key_icons(player_center: Vector2, player_radius: float) -> void
 
 		for _i in range(count):
 			var icon_center := player_center + Vector2(
-				player_radius + 13 + icon_index * 16,
-				-player_radius + 5
+				player_radius + (13.0 + icon_index * 16.0) * size_scale,
+				-player_radius + 5.0 * size_scale
 			)
 
-			_draw_key_icon(icon_center, key_color, 0.45)
+			_draw_key_icon(icon_center, key_color, 0.45 * size_scale)
 			icon_index += 1
 
 
 func _draw_key_icon(center: Vector2, key_color: Color, scale: float) -> void:
 	var head_radius := 8.0 * scale
 	var shaft_length := 20.0 * scale
-	var shaft_width := 3.0 * scale
+	var shaft_width := maxf(1.0, 3.0 * scale)
 	var tooth_size := 5.0 * scale
 
 	var head_center := center + Vector2(-shaft_length * 0.35, 0)
@@ -2301,7 +4059,7 @@ func _draw_key_icon(center: Vector2, key_color: Color, scale: float) -> void:
 
 
 func _cell_to_world(value: Vector2i) -> Vector2:
-	return GameConfig.BOARD_OFFSET + Vector2(value.x * cell_size, value.y * cell_size)
+	return GameConfig.cell_to_world(value)
 </file>
 
 <file path="scripts/player.gd.uid">
@@ -2312,7 +4070,6 @@ uid://c1piffxblqlpj
 extends Node2D
 
 @export var texture: Texture2D
-@export var cell_size := 56
 @export var color_name := "blue"
 
 var cell := Vector2i.ZERO
@@ -2320,6 +4077,10 @@ var cell := Vector2i.ZERO
 
 func set_cell(value: Vector2i) -> void:
 	cell = value
+	refresh_layout()
+
+
+func refresh_layout() -> void:
 	position = _cell_to_world(cell)
 	queue_redraw()
 
@@ -2330,21 +4091,23 @@ func set_color_name(value: String) -> void:
 
 
 func _draw() -> void:
+	var size := float(GameConfig.cell_size)
+
 	if texture != null:
-		draw_texture_rect(texture, Rect2(Vector2.ZERO, Vector2(cell_size, cell_size)), false)
+		draw_texture_rect(texture, Rect2(Vector2.ZERO, Vector2(size, size)), false)
 		return
 
-	var center := Vector2(cell_size, cell_size) / 2.0
+	var center := Vector2(size, size) / 2.0
 	var portal_color := GameConfig.get_key_color(color_name)
 
-	draw_circle(center, cell_size * 0.36, Color(0.04, 0.04, 0.08))
-	draw_arc(center, cell_size * 0.32, 0.0, TAU, 48, portal_color, 4.0)
-	draw_arc(center, cell_size * 0.20, 0.0, TAU, 48, portal_color.lightened(0.35), 3.0)
-	draw_circle(center, cell_size * 0.08, portal_color.darkened(0.25))
+	draw_circle(center, size * 0.36, Color(0.04, 0.04, 0.08))
+	draw_arc(center, size * 0.32, 0.0, TAU, 48, portal_color, maxf(1.0, size * 0.07))
+	draw_arc(center, size * 0.20, 0.0, TAU, 48, portal_color.lightened(0.35), maxf(1.0, size * 0.05))
+	draw_circle(center, size * 0.08, portal_color.darkened(0.25))
 
 
 func _cell_to_world(value: Vector2i) -> Vector2:
-	return GameConfig.BOARD_OFFSET + Vector2(value.x * cell_size, value.y * cell_size)
+	return GameConfig.cell_to_world(value)
 </file>
 
 <file path="scripts/portal.gd.uid">
@@ -2355,60 +4118,69 @@ uid://gfgs13turu7v
 extends Node2D
 
 @export var texture: Texture2D
-@export var cell_size := 56
 
 var cell := Vector2i.ZERO
 
 
 func set_cell(value: Vector2i) -> void:
 	cell = value
+	refresh_layout()
+
+
+func refresh_layout() -> void:
 	position = _cell_to_world(cell)
 	queue_redraw()
 
 
 func _draw() -> void:
+	var size := float(GameConfig.cell_size)
+
 	if texture != null:
-		draw_texture_rect(texture, Rect2(Vector2.ZERO, Vector2(cell_size, cell_size)), false)
+		draw_texture_rect(texture, Rect2(Vector2.ZERO, Vector2(size, size)), false)
 		return
 
-	var rect := Rect2(Vector2(8, 8), Vector2(cell_size - 16, cell_size - 16))
+	var padding := size * 0.14
+	var rect := Rect2(Vector2(padding, padding), Vector2(size - padding * 2.0, size - padding * 2.0))
+	var line_width := maxf(1.0, size * 0.04)
 
 	draw_rect(rect, Color(0.85, 0.72, 0.25), true)
-	draw_rect(rect, Color(0.3, 0.22, 0.05), false, 2.0)
+	draw_rect(rect, Color(0.3, 0.22, 0.05), false, line_width)
 
 	for i in range(4):
-		var step_y := rect.position.y + rect.size.y - 8 - i * 9
-		var step_x := rect.position.x + 6 + i * 8
+		var step_y := rect.position.y + rect.size.y - size * 0.14 - float(i) * size * 0.16
+		var step_x := rect.position.x + size * 0.11 + float(i) * size * 0.14
 		draw_line(
 			Vector2(step_x, step_y),
-			Vector2(rect.position.x + rect.size.x - 6, step_y),
+			Vector2(rect.position.x + rect.size.x - size * 0.11, step_y),
 			Color(0.25, 0.18, 0.04),
-			3.0
+			line_width
 		)
 
 	var arrow_center := rect.position + rect.size / 2.0
+	var arrow_length := size * 0.18
+	var arrow_side := size * 0.12
 	draw_line(
-		arrow_center + Vector2(0, 10),
-		arrow_center + Vector2(0, -10),
+		arrow_center + Vector2(0, arrow_length),
+		arrow_center + Vector2(0, -arrow_length),
 		Color(0.25, 0.18, 0.04),
-		3.0
+		line_width
 	)
 	draw_line(
-		arrow_center + Vector2(0, -10),
-		arrow_center + Vector2(-7, -3),
+		arrow_center + Vector2(0, -arrow_length),
+		arrow_center + Vector2(-arrow_side, -arrow_length * 0.3),
 		Color(0.25, 0.18, 0.04),
-		3.0
+		line_width
 	)
 	draw_line(
-		arrow_center + Vector2(0, -10),
-		arrow_center + Vector2(7, -3),
+		arrow_center + Vector2(0, -arrow_length),
+		arrow_center + Vector2(arrow_side, -arrow_length * 0.3),
 		Color(0.25, 0.18, 0.04),
-		3.0
+		line_width
 	)
 
 
 func _cell_to_world(value: Vector2i) -> Vector2:
-	return GameConfig.BOARD_OFFSET + Vector2(value.x * cell_size, value.y * cell_size)
+	return GameConfig.cell_to_world(value)
 </file>
 
 <file path="scripts/stairs.gd.uid">
@@ -2448,31 +4220,38 @@ uid://q7p5c3i27peb
 extends Node2D
 
 @export var texture: Texture2D
-@export var cell_size := 56
 
 var cell := Vector2i.ZERO
 
 
 func set_cell(value: Vector2i) -> void:
 	cell = value
+	refresh_layout()
+
+
+func refresh_layout() -> void:
 	position = _cell_to_world(cell)
 	queue_redraw()
 
 
 func _draw() -> void:
+	var size := float(GameConfig.cell_size)
+
 	if texture != null:
-		draw_texture_rect(texture, Rect2(Vector2.ZERO, Vector2(cell_size, cell_size)), false)
+		draw_texture_rect(texture, Rect2(Vector2.ZERO, Vector2(size, size)), false)
 		return
 
-	var rect := Rect2(Vector2.ZERO, Vector2(cell_size, cell_size))
+	var rect := Rect2(Vector2.ZERO, Vector2(size, size))
+	var line_width := maxf(1.0, size * 0.035)
+
 	draw_rect(rect, Color(0.08, 0.08, 0.10), true)
-	draw_rect(rect, Color(0.50, 0.50, 0.55), false, 2.0)
-	draw_line(Vector2(8, 16), Vector2(cell_size - 8, 16), Color(0.25, 0.25, 0.28), 2.0)
-	draw_line(Vector2(8, 36), Vector2(cell_size - 8, 36), Color(0.25, 0.25, 0.28), 2.0)
+	draw_rect(rect, Color(0.50, 0.50, 0.55), false, line_width)
+	draw_line(Vector2(size * 0.14, size * 0.29), Vector2(size * 0.86, size * 0.29), Color(0.25, 0.25, 0.28), line_width)
+	draw_line(Vector2(size * 0.14, size * 0.64), Vector2(size * 0.86, size * 0.64), Color(0.25, 0.25, 0.28), line_width)
 
 
 func _cell_to_world(value: Vector2i) -> Vector2:
-	return GameConfig.BOARD_OFFSET + Vector2(value.x * cell_size, value.y * cell_size)
+	return GameConfig.cell_to_world(value)
 </file>
 
 <file path="scripts/wall.gd.uid">
