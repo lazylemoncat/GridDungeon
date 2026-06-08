@@ -9,6 +9,8 @@ const DIRS: Array[Vector2i] = [
 ]
 
 const INVALID_CELL := Vector2i(-1, -1)
+const MAX_BITMASK_ENTITY_COUNT := 60
+
 
 const ENTITY_KEY := "key"
 const ENTITY_DOOR := "door"
@@ -35,6 +37,10 @@ const DEFAULT_GENERATION_PROFILE := {
 	"min_floor_count": 4,
 	"min_extra_leaves": 3,
 	"main_path_door_spacing": 4,
+	"required_gate_min": 1,
+	"required_gate_max": 3,
+	"target_min_steps": 0,
+	"target_max_steps": 999999,
 	"require_unique_optimal_solution": true,
 	"solution_policy": "unique_optimal",
 	"decoy_door_extra_max": 2,
@@ -75,6 +81,7 @@ class SolverState:
 
 
 class SolverContext:
+	var grid_size: int = 0
 	var floor_set: Dictionary = {}
 	var exit_cell: Vector2i = Vector2i.ZERO
 	var key_colors: Array[String] = []
@@ -168,26 +175,25 @@ class PortalMechanicRule:
 		return cell
 
 
-func generate(grid_size: int, door_count: int = 3, seed: int = -1, profile: Dictionary = {}) -> Dictionary:
+func generate(grid_size: int, seed: int = -1, profile: Dictionary = {}) -> Dictionary:
 	if seed >= 0:
 		rng.seed = seed
 	else:
 		rng.randomize()
 
-	var generation_profile := _make_generation_profile(grid_size, door_count, profile)
+	var generation_profile := _make_generation_profile(grid_size, profile)
 	var safe_grid_size: int = generation_profile["grid_size"]
-	var safe_door_count: int = generation_profile["door_count"]
 	var max_attempts: int = int(generation_profile["max_generation_attempts"])
 	var require_unique_optimal_solution: bool = bool(generation_profile["require_unique_optimal_solution"])
 	var fail_reasons := {}
 
 	for attempt in range(max_attempts):
-		var level := _try_generate(safe_grid_size, safe_door_count, generation_profile, fail_reasons)
+		var level := _try_generate(safe_grid_size, generation_profile, fail_reasons)
 
 		if level.is_empty():
 			continue
 
-		var solved := solve_level(level)
+		var solved := solve_level(level, require_unique_optimal_solution, false)
 
 		if not solved["found"]:
 			_record_fail(fail_reasons, "solver_no_solution")
@@ -197,14 +203,23 @@ func generate(grid_size: int, door_count: int = 3, seed: int = -1, profile: Dict
 			_record_fail(fail_reasons, "not_unique_optimal_solution")
 			continue
 
-		level["optimal_steps"] = solved["steps"]
-		level["optimal_path"] = solved["path"]
-		level["optimal_solution_count"] = solved["optimal_solution_count"]
-		level["solution_count"] = solved["optimal_solution_count"] # Legacy alias.
+		if not _matches_difficulty_target(solved, generation_profile):
+			_record_fail(fail_reasons, "difficulty_target_mismatch")
+			continue
+
+		var solved_with_path := solve_level(level, false, true)
+
+		level["optimal_steps"] = solved_with_path["steps"]
+		level["optimal_path"] = solved_with_path["path"]
+		level["optimal_solution_count"] = solved_with_path["optimal_solution_count"]
+		level["solution_count"] = solved_with_path["optimal_solution_count"] # Legacy alias.
 		level["generation_debug"] = {
 			"attempt": attempt + 1,
 			"fail_reasons": fail_reasons.duplicate(),
-			"solution_policy": generation_profile["solution_policy"]
+			"solution_policy": generation_profile["solution_policy"],
+			"profile": generation_profile.duplicate(),
+			"solver_state_count": solved_with_path.get("state_count", 0),
+			"solver_max_queue_size": solved_with_path.get("max_queue_size", 0)
 		}
 		return level
 
@@ -222,7 +237,6 @@ func generate(grid_size: int, door_count: int = 3, seed: int = -1, profile: Dict
 
 func _try_generate(
 	grid_size: int,
-	requested_door_count: int,
 	generation_profile: Dictionary,
 	fail_reasons: Dictionary
 ) -> Dictionary:
@@ -257,17 +271,17 @@ func _try_generate(
 	var exit_cell := _farthest_leaf(start_cell, adjacency)
 	var main_path := _find_path(start_cell, exit_cell, adjacency)
 
-	var max_doors_by_path := int((main_path.size() - 4) / 3)
-	var door_count := mini(requested_door_count, mini(door_count_by_leaves, max_doors_by_path))
+	var spacing := int(generation_profile["main_path_door_spacing"])
+	var required_gate_count := _choose_required_gate_count(main_path.size(), door_count_by_leaves, generation_profile)
 
-	if door_count < 1:
+	if required_gate_count < 1:
 		_record_fail(fail_reasons, "main_path_too_short")
 		return {}
 
 	var path_set := _make_set(main_path)
-	var door_indices := _choose_door_indices(main_path.size(), door_count)
+	var door_indices := _choose_door_indices(main_path.size(), required_gate_count, spacing)
 
-	if door_indices.size() != door_count:
+	if door_indices.size() != required_gate_count:
 		_record_fail(fail_reasons, "door_indices_failed")
 		return {}
 
@@ -279,9 +293,9 @@ func _try_generate(
 	var keys := {}
 	var portals := {}
 	var used_colors := {}
-	var required_colors := _make_door_color_sequence(door_count)
+	var required_colors := _make_door_color_sequence(required_gate_count)
 
-	for i in range(door_count):
+	for i in range(required_gate_count):
 		var door_index: int = door_indices[i]
 		var door_cell: Vector2i = main_path[door_index]
 		var color_name: String = required_colors[i]
@@ -292,7 +306,7 @@ func _try_generate(
 
 	var previous_door_index := 0
 
-	for i in range(door_count):
+	for i in range(required_gate_count):
 		var door_index: int = door_indices[i]
 		var color_name: String = required_colors[i]
 		var zone_cells := _collect_zone_cells(main_path, adjacency, previous_door_index, door_index - 1, path_set)
@@ -317,7 +331,7 @@ func _try_generate(
 		used_colors,
 		start_cell,
 		exit_cell,
-		door_count,
+		required_gate_count,
 		generation_profile
 	)
 
@@ -346,8 +360,20 @@ func _try_generate(
 	)
 
 
-func solve_level(level: Dictionary) -> Dictionary:
-	var context: SolverContext = _build_solver_context(level)
+func solve_level(level: Dictionary, stop_after_multiple_optimal := false, store_path := true) -> Dictionary:
+	var context = _build_solver_context(level)
+
+	if context == null:
+		return {
+			"found": false,
+			"steps": -1,
+			"optimal_solution_count": 0,
+			"solution_count": 0,
+			"path": [],
+			"state_count": 0,
+			"max_queue_size": 0
+		}
+
 	var start_cell: Vector2i = _get_start_cell(level)
 	var start_key_counts: Array[int] = []
 	start_key_counts.resize(context.key_colors.size())
@@ -370,12 +396,18 @@ func solve_level(level: Dictionary) -> Dictionary:
 
 	distances[start_state_key] = 0
 	ways[start_state_key] = 1
-	previous_state[start_state_key] = ""
 	state_cell[start_state_key] = start_cell
 
+	if store_path:
+		previous_state[start_state_key] = ""
+
 	var best_steps := -1
+	var max_queue_size := 1
 
 	while head < queue.size():
+		if queue.size() > max_queue_size:
+			max_queue_size = queue.size()
+
 		var current_state = queue[head]
 		head += 1
 
@@ -397,8 +429,11 @@ func solve_level(level: Dictionary) -> Dictionary:
 			if not distances.has(next_state_key):
 				distances[next_state_key] = next_distance
 				ways[next_state_key] = ways[current_state_key]
-				previous_state[next_state_key] = current_state_key
 				state_cell[next_state_key] = next_state.cell
+
+				if store_path:
+					previous_state[next_state_key] = current_state_key
+
 				queue.append(next_state)
 
 				if next_state.cell == context.exit_cell and (best_steps == -1 or next_distance < best_steps):
@@ -412,7 +447,9 @@ func solve_level(level: Dictionary) -> Dictionary:
 			"steps": -1,
 			"optimal_solution_count": 0,
 			"solution_count": 0,
-			"path": []
+			"path": [],
+			"state_count": distances.size(),
+			"max_queue_size": max_queue_size
 		}
 
 	var optimal_solution_count := 0
@@ -430,12 +467,30 @@ func solve_level(level: Dictionary) -> Dictionary:
 		if best_exit_state_key == "":
 			best_exit_state_key = state_key
 
+		if stop_after_multiple_optimal and optimal_solution_count > 1:
+			return {
+				"found": true,
+				"steps": best_steps,
+				"optimal_solution_count": optimal_solution_count,
+				"solution_count": optimal_solution_count,
+				"path": [],
+				"state_count": distances.size(),
+				"max_queue_size": max_queue_size
+			}
+
+	var path: Array[Vector2i] = []
+
+	if store_path and best_exit_state_key != "":
+		path = _reconstruct_state_path(best_exit_state_key, previous_state, state_cell)
+
 	return {
 		"found": true,
 		"steps": best_steps,
 		"optimal_solution_count": optimal_solution_count,
 		"solution_count": optimal_solution_count, # Legacy alias.
-		"path": _reconstruct_state_path(best_exit_state_key, previous_state, state_cell)
+		"path": path,
+		"state_count": distances.size(),
+		"max_queue_size": max_queue_size
 	}
 
 
@@ -465,6 +520,7 @@ func _try_move_state(context, current_state, direction: Vector2i):
 
 func _build_solver_context(level: Dictionary):
 	var context := SolverContext.new()
+	context.grid_size = int(level.get("grid_size", 0))
 	context.floor_set = _make_set(_get_floor_cells(level))
 	context.exit_cell = _get_exit_cell(level)
 
@@ -483,6 +539,10 @@ func _build_solver_context(level: Dictionary):
 	var key_cells := keys.keys()
 	_sort_vector2i_array(key_cells)
 
+	if key_cells.size() > MAX_BITMASK_ENTITY_COUNT:
+		push_error("钥匙数量超过 bitmask 求解器上限：%d" % [key_cells.size()])
+		return null
+
 	for i in range(key_cells.size()):
 		var cell: Vector2i = key_cells[i]
 		context.key_cell_to_index[cell] = i
@@ -490,6 +550,10 @@ func _build_solver_context(level: Dictionary):
 
 	var door_cells := doors.keys()
 	_sort_vector2i_array(door_cells)
+
+	if door_cells.size() > MAX_BITMASK_ENTITY_COUNT:
+		push_error("门数量超过 bitmask 求解器上限：%d" % [door_cells.size()])
+		return null
 
 	for i in range(door_cells.size()):
 		var cell: Vector2i = door_cells[i]
@@ -525,7 +589,7 @@ func _build_level_data(
 	door_indices: Array,
 	generation_profile: Dictionary
 ) -> Dictionary:
-	var key_colors := _sort_colors_by_config(used_colors)
+	var key_colors := _sort_colors_by_config(_collect_used_colors(keys, doors))
 	var portal_links := _build_portal_links(portals)
 	var terrain := {
 		"floor_cells": floor_cells,
@@ -571,6 +635,7 @@ func _build_level_data(
 		"key_colors": key_colors,
 		"main_path": main_path,
 		"door_indices": door_indices,
+		"required_gate_count": door_indices.size(),
 		"optimal_steps": -1,
 		"optimal_path": [],
 		"optimal_solution_count": 0,
@@ -623,14 +688,19 @@ func _build_entities(keys: Dictionary, doors: Dictionary, portals: Dictionary) -
 	return result
 
 
-func _make_generation_profile(grid_size: int, door_count: int, overrides: Dictionary) -> Dictionary:
+func _make_generation_profile(grid_size: int, overrides: Dictionary) -> Dictionary:
 	var result := DEFAULT_GENERATION_PROFILE.duplicate(true)
 
 	for key in overrides.keys():
 		result[key] = overrides[key]
 
 	result["grid_size"] = clampi(grid_size, GameConfig.MIN_GRID_SIZE, GameConfig.MAX_GRID_SIZE)
-	result["door_count"] = maxi(3, door_count)
+	result["required_gate_min"] = maxi(1, int(result["required_gate_min"]))
+	result["required_gate_max"] = maxi(int(result["required_gate_min"]), int(result["required_gate_max"]))
+	result["main_path_door_spacing"] = maxi(1, int(result["main_path_door_spacing"]))
+	result["target_min_steps"] = maxi(0, int(result["target_min_steps"]))
+	result["target_max_steps"] = maxi(int(result["target_min_steps"]), int(result["target_max_steps"]))
+	result["min_floor_count"] = clampi(int(result["min_floor_count"]), 2, result["grid_size"] * result["grid_size"])
 
 	return result
 
@@ -987,25 +1057,60 @@ func _find_path(start_cell: Vector2i, target_cell: Vector2i, adjacency: Dictiona
 	return path
 
 
-func _choose_door_indices(path_size: int, door_count: int) -> Array[int]:
+func _choose_required_gate_count(
+	main_path_size: int,
+	max_gates_by_leaves: int,
+	generation_profile: Dictionary
+) -> int:
+	var spacing := maxi(1, int(generation_profile["main_path_door_spacing"]))
+	var min_index := 3
+	var max_index := main_path_size - 2
+	var usable_count := max_index - min_index + 1
+
+	if usable_count <= 0:
+		return 0
+
+	var max_gates_by_path := maxi(1, int(ceil(float(usable_count) / float(spacing))))
+	var max_gate_count := mini(max_gates_by_leaves, max_gates_by_path)
+
+	if max_gate_count < 1:
+		return 0
+
+	var requested_min := int(generation_profile["required_gate_min"])
+	var requested_max := int(generation_profile["required_gate_max"])
+	var safe_min := clampi(requested_min, 1, max_gate_count)
+	var safe_max := clampi(requested_max, safe_min, max_gate_count)
+
+	return rng.randi_range(safe_min, safe_max)
+
+
+func _choose_door_indices(path_size: int, door_count: int, spacing: int) -> Array[int]:
 	var result: Array[int] = []
 	var min_index := 3
 	var max_index := path_size - 2
 
-	if max_index <= min_index:
+	if max_index < min_index or door_count < 1:
 		return result
 
+	var slots: Array[int] = []
+	var index := min_index
+
+	while index <= max_index:
+		slots.append(index)
+		index += spacing
+
+	if slots.size() < door_count:
+		return result
+
+	if door_count == 1:
+		result.append(slots[int(slots.size() / 2)])
+		return result
+
+	var last_slot_index := slots.size() - 1
+
 	for i in range(door_count):
-		var t := float(i + 1) / float(door_count + 1)
-		var index := min_index + int(round(float(max_index - min_index) * t))
-
-		while result.has(index) and index < max_index:
-			index += 1
-
-		if result.has(index):
-			return []
-
-		result.append(index)
+		var slot_position := int(round(float(i) * float(last_slot_index) / float(door_count - 1)))
+		result.append(slots[slot_position])
 
 	result.sort()
 	return result
@@ -1084,20 +1189,34 @@ func _build_portal_links(portals: Dictionary) -> Dictionary:
 	return links
 
 
-func _make_state_key(context, state) -> String:
-	var key_count_parts: Array[String] = []
+func _make_state_key(context: SolverContext, state: SolverState) -> String:
+	var cell_id: int = state.cell.y * context.grid_size + state.cell.x
+	var key_counts_signature: String = _encode_key_counts(state.key_counts)
 
-	for count in state.key_counts:
-		key_count_parts.append(str(count))
+	if state.extra.is_empty():
+		return "%d|%s|%d|%d" % [
+			cell_id,
+			key_counts_signature,
+			state.picked_key_mask,
+			state.opened_door_mask
+		]
 
-	return "%d,%d|%s|%d|%d|%s" % [
-		state.cell.x,
-		state.cell.y,
-		",".join(key_count_parts),
+	return "%d|%s|%d|%d|%s" % [
+		cell_id,
+		key_counts_signature,
 		state.picked_key_mask,
 		state.opened_door_mask,
 		_make_extra_state_signature(context, state.extra)
 	]
+
+
+func _encode_key_counts(key_counts: Array[int]) -> String:
+	var parts: Array[String] = []
+
+	for count in key_counts:
+		parts.append(str(count))
+
+	return ",".join(parts)
 
 
 func _make_extra_state_signature(_context, extra: Dictionary) -> String:
@@ -1210,6 +1329,30 @@ func _collect_key_colors(keys: Dictionary, doors: Dictionary) -> Array[String]:
 		color_set[doors[cell]] = true
 
 	return _sort_colors_by_config(color_set)
+
+
+func _collect_used_colors(keys: Dictionary, doors: Dictionary) -> Dictionary:
+	var result := {}
+
+	for cell in keys.keys():
+		result[keys[cell]] = true
+
+	for cell in doors.keys():
+		result[doors[cell]] = true
+
+	return result
+
+
+func _matches_difficulty_target(solved: Dictionary, profile: Dictionary) -> bool:
+	var steps := int(solved["steps"])
+
+	if steps < int(profile["target_min_steps"]):
+		return false
+
+	if steps > int(profile["target_max_steps"]):
+		return false
+
+	return true
 
 
 func _sort_colors_by_config(color_set: Dictionary) -> Array[String]:

@@ -14,7 +14,7 @@ extends Node2D
 @onready var hud := $HUD
 
 var grid_size := 5
-var current_floor := 1
+var current_floor := 0
 var total_moves := 0
 var floor_moves := 0
 var optimal_steps := -1
@@ -25,16 +25,34 @@ var door_cells := {}
 var portal_cells := {}
 var floor_cells: Array[Vector2i] = []
 
-var level_generator := LevelGenerator.new()
-var difficulty_selector := LevelDifficultySelector.new()
+var has_active_floor := false
+var is_generating_floor := false
+var pending_floor_number := 0
+var generation_thread: Thread
+var block_floor_advance_until_player_leaves_exit := false
+
+var loading_layer: CanvasLayer
+var loading_root: Control
+var loading_spinner_label: Label
+var loading_message_label: Label
+var loading_frames: Array[String] = ["◜", "◠", "◝", "◞", "◡", "◟"]
+var loading_frame_index := 0
+var loading_frame_elapsed := 0.0
 
 
 func _ready() -> void:
 	randomize()
-	_start_new_floor()
+	_create_loading_overlay()
+	_begin_generate_floor(1)
 
 
-func _process(_delta: float) -> void:
+func _process(delta: float) -> void:
+	_update_loading_overlay(delta)
+	_poll_generation_thread()
+
+	if is_generating_floor:
+		return
+
 	if _try_advance_floor_if_on_exit():
 		return
 
@@ -53,33 +71,106 @@ func _process(_delta: float) -> void:
 		_try_move_player(direction)
 
 
-func _start_new_floor() -> void:
-	var level := {}
+func _exit_tree() -> void:
+	if generation_thread != null and generation_thread.is_started():
+		generation_thread.wait_to_finish()
 
-	for _attempt in range(LevelDifficultySelector.GENERATION_RETRY_COUNT):
-		var settings := difficulty_selector.pick_level_settings()
-		level = level_generator.generate(settings["grid_size"], settings["door_count"])
 
-		if not level.is_empty():
-			break
-
-	if level.is_empty():
+func _begin_generate_floor(floor_number: int) -> void:
+	if is_generating_floor:
 		return
 
+	pending_floor_number = floor_number
+	is_generating_floor = true
+	_show_loading_overlay("正在生成第 %d 层..." % floor_number)
+
+	generation_thread = Thread.new()
+	var start_error: int = generation_thread.start(Callable(self, "_generate_floor_thread").bind(floor_number))
+
+	if start_error != OK:
+		push_warning("无法启动后台生成线程，改为同步生成。")
+		generation_thread = null
+		var result: Dictionary = _generate_floor_thread(floor_number)
+		is_generating_floor = false
+		_finish_generation_result(result)
+
+
+func _generate_floor_thread(floor_number: int) -> Dictionary:
+	var worker_generator := LevelGenerator.new()
+	var worker_difficulty_selector := LevelDifficultySelector.new()
+
+	for attempt_index in range(LevelDifficultySelector.GENERATION_RETRY_COUNT):
+		var request: Dictionary = worker_difficulty_selector.pick_level_request(floor_number)
+		var level: Dictionary = worker_generator.generate(
+			int(request["grid_size"]),
+			-1,
+			request["profile"]
+		)
+
+		if not level.is_empty():
+			return {
+				"success": true,
+				"floor_number": floor_number,
+				"level": level,
+				"attempts": attempt_index + 1
+			}
+
+	return {
+		"success": false,
+		"floor_number": floor_number,
+		"level": {},
+		"attempts": LevelDifficultySelector.GENERATION_RETRY_COUNT
+	}
+
+
+func _poll_generation_thread() -> void:
+	if generation_thread == null:
+		return
+
+	if generation_thread.is_alive():
+		return
+
+	var result: Dictionary = generation_thread.wait_to_finish()
+	generation_thread = null
+	is_generating_floor = false
+	_finish_generation_result(result)
+
+
+func _finish_generation_result(result: Dictionary) -> void:
+	if bool(result.get("success", false)):
+		_apply_generated_floor(int(result["floor_number"]), result["level"])
+		_hide_loading_overlay()
+		block_floor_advance_until_player_leaves_exit = false
+		return
+
+	_hide_loading_overlay()
+
+	if has_active_floor:
+		block_floor_advance_until_player_leaves_exit = true
+		push_warning("下一层生成失败，保留当前层。")
+		_update_hud()
+		return
+
+	push_error("初始楼层生成失败。请降低难度参数或增加生成尝试次数。")
+
+
+func _apply_generated_floor(floor_number: int, level: Dictionary) -> void:
 	_clear_floor_entities()
-	grid_size = level["grid_size"]
+	current_floor = floor_number
+	grid_size = int(level["grid_size"])
 	floor_cells.assign(level["floor_cells"])
 	wall_cells.assign(level["walls"])
 	key_cells = level["keys"]
 	door_cells = level["doors"]
 	portal_cells = level["portals"]
-	optimal_steps = level["optimal_steps"]
+	optimal_steps = int(level["optimal_steps"])
 
 	player.set_cell(level["start"])
 	player.clear_keys()
 	stairs.set_cell(level["exit"])
 
 	floor_moves = 0
+	has_active_floor = true
 	_spawn_floor_entities()
 
 	_update_hud()
@@ -87,6 +178,9 @@ func _start_new_floor() -> void:
 
 
 func _try_move_player(direction: Vector2i) -> void:
+	if not has_active_floor or is_generating_floor:
+		return
+
 	var next_cell: Vector2i = player.cell + direction
 
 	if not _is_inside_grid(next_cell):
@@ -125,11 +219,17 @@ func _update_hud() -> void:
 
 
 func _try_advance_floor_if_on_exit() -> bool:
-	if player.cell != stairs.cell:
+	if not has_active_floor or is_generating_floor:
 		return false
 
-	current_floor += 1
-	_start_new_floor()
+	if player.cell != stairs.cell:
+		block_floor_advance_until_player_leaves_exit = false
+		return false
+
+	if block_floor_advance_until_player_leaves_exit:
+		return false
+
+	_begin_generate_floor(current_floor + 1)
 	return true
 
 
@@ -217,3 +317,86 @@ func _open_door(cell: Vector2i) -> void:
 		if door.cell == cell:
 			door.queue_free()
 			break
+
+
+func _create_loading_overlay() -> void:
+	loading_layer = CanvasLayer.new()
+	loading_layer.layer = 100
+	add_child(loading_layer)
+
+	loading_root = Control.new()
+	loading_root.visible = false
+	loading_root.mouse_filter = Control.MOUSE_FILTER_STOP
+	loading_root.anchor_right = 1.0
+	loading_root.anchor_bottom = 1.0
+	loading_layer.add_child(loading_root)
+
+	var background := ColorRect.new()
+	background.color = Color(0.0, 0.0, 0.0, 0.45)
+	background.anchor_right = 1.0
+	background.anchor_bottom = 1.0
+	loading_root.add_child(background)
+
+	var box := VBoxContainer.new()
+	box.anchor_left = 0.5
+	box.anchor_top = 0.5
+	box.anchor_right = 0.5
+	box.anchor_bottom = 0.5
+	box.offset_left = -180.0
+	box.offset_top = -90.0
+	box.offset_right = 180.0
+	box.offset_bottom = 90.0
+	box.alignment = BoxContainer.ALIGNMENT_CENTER
+	box.add_theme_constant_override("separation", 10)
+	loading_root.add_child(box)
+
+	loading_spinner_label = Label.new()
+	loading_spinner_label.text = loading_frames[0]
+	loading_spinner_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	loading_spinner_label.add_theme_font_size_override("font_size", 64)
+	box.add_child(loading_spinner_label)
+
+	loading_message_label = Label.new()
+	loading_message_label.text = "正在生成关卡..."
+	loading_message_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	loading_message_label.add_theme_font_size_override("font_size", 22)
+	box.add_child(loading_message_label)
+
+	var hint_label := Label.new()
+	hint_label.text = "正在搜索可解且难度合适的地图"
+	hint_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	hint_label.add_theme_font_size_override("font_size", 15)
+	hint_label.modulate = Color(1.0, 1.0, 1.0, 0.72)
+	box.add_child(hint_label)
+
+
+func _show_loading_overlay(message: String) -> void:
+	if loading_root == null:
+		return
+
+	loading_message_label.text = message
+	loading_frame_index = 0
+	loading_frame_elapsed = 0.0
+	loading_spinner_label.text = loading_frames[loading_frame_index]
+	loading_root.visible = true
+
+
+func _hide_loading_overlay() -> void:
+	if loading_root == null:
+		return
+
+	loading_root.visible = false
+
+
+func _update_loading_overlay(delta: float) -> void:
+	if loading_root == null or not loading_root.visible:
+		return
+
+	loading_frame_elapsed += delta
+
+	if loading_frame_elapsed < 0.08:
+		return
+
+	loading_frame_elapsed = 0.0
+	loading_frame_index = (loading_frame_index + 1) % loading_frames.size()
+	loading_spinner_label.text = loading_frames[loading_frame_index]
