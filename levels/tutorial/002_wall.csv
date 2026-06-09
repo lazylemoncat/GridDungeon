@@ -1,0 +1,5 @@
+floor,floor,floor,wall,floor
+floor,wall,floor,wall,floor
+floor,wall,floor,wall,exit
+start,wall,floor,floor,floor
+floor,wall,wall,wall,floor

@@ -11,3 +11,27 @@ offset_top = 20.0
 offset_right = 300.0
 offset_bottom = 130.0
 theme_override_font_sizes/font_size = 20
+
+[node name="TopRightControls" type="HBoxContainer" parent="."]
+anchors_preset = 1
+anchor_left = 1.0
+anchor_right = 1.0
+offset_left = -316.0
+offset_top = 20.0
+offset_right = -20.0
+offset_bottom = 76.0
+grow_horizontal = 0
+theme_override_constants/separation = 12
+alignment = 2
+
+[node name="ReturnHomeButton" type="Button" parent="TopRightControls"]
+custom_minimum_size = Vector2(132, 44)
+layout_mode = 2
+theme_override_font_sizes/font_size = 18
+text = "返回首页"
+
+[node name="RestartButton" type="Button" parent="TopRightControls"]
+custom_minimum_size = Vector2(132, 44)
+layout_mode = 2
+theme_override_font_sizes/font_size = 18
+text = "重新开始"

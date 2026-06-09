@@ -1,0 +1,19 @@
+[remap]
+
+importer="csv_translation"
+type="Translation"
+uid="uid://dp8i5af1ptu5m"
+
+[deps]
+
+files=["res://levels/tutorial/002_key_door.floor.translation", "res://levels/tutorial/002_key_door.wall.translation", "res://levels/tutorial/002_key_door.floor.translation", "res://levels/tutorial/002_key_door.floor.translation"]
+
+source_file="res://levels/tutorial/002_key_door.csv"
+dest_files=["res://levels/tutorial/002_key_door.floor.translation", "res://levels/tutorial/002_key_door.wall.translation", "res://levels/tutorial/002_key_door.floor.translation", "res://levels/tutorial/002_key_door.floor.translation"]
+
+[params]
+
+compress=1
+delimiter=0
+unescape_keys=false
+unescape_translations=true

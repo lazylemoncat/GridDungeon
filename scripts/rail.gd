@@ -1,9 +1,11 @@
+
 extends Node2D
 
 var rail_id := ""
 var ports: Array[Vector2i] = []
 var connections: Array = []
 var paths: Array = []
+var switch_cell := Vector2i(-1, -1)
 var state := 0
 var color_name := "cyan"
 
@@ -14,12 +16,14 @@ func set_rail_data(
 	p_connections: Array,
 	p_state: int,
 	p_color_name: String,
-	p_paths: Array = []
+	p_paths: Array = [],
+	p_switch_cell: Vector2i = Vector2i(-1, -1)
 ) -> void:
 	rail_id = p_rail_id
 	ports = p_ports.duplicate()
 	connections = p_connections.duplicate(true)
 	paths = p_paths.duplicate(true)
+	switch_cell = p_switch_cell
 	state = p_state
 	color_name = p_color_name
 	queue_redraw()
@@ -62,7 +66,7 @@ func _draw() -> void:
 		centers.append(center)
 		switch_center += center
 
-	switch_center /= float(centers.size())
+	switch_center = _get_switch_center(centers, size)
 
 	# 当前连通关系由轨道路上的高亮路径表现；不再画端口之间的直连线。
 	if paths.is_empty():
@@ -77,6 +81,18 @@ func _get_active_connection() -> Array:
 		return []
 
 	return connections[wrapi(state, 0, connections.size())]
+
+
+func _get_switch_center(centers: Array[Vector2], size: float) -> Vector2:
+	if switch_cell != Vector2i(-1, -1):
+		return GameConfig.cell_to_world(switch_cell) + Vector2(size, size) / 2.0
+
+	var result := Vector2.ZERO
+
+	for center in centers:
+		result += center
+
+	return result / float(centers.size())
 
 
 func _draw_active_hands(

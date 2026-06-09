@@ -1,8 +1,10 @@
+
 extends Node2D
 
 const MobileControlsScript := preload("res://scripts/ui/mobile_controls.gd")
 const RailScript := preload("res://scripts/rail.gd")
 const RailLeverScript := preload("res://scripts/rail_lever.gd")
+const TutorialLevelsData := preload("res://scripts/tutorial_levels.gd")
 
 @export var show_mobile_controls := true
 @export var wall_scene: PackedScene
@@ -39,6 +41,10 @@ var is_generating_floor := false
 var pending_floor_number := 0
 var generation_thread: Thread
 var block_floor_advance_until_player_leaves_exit := false
+var tutorial_levels: Array[Dictionary] = []
+var tutorial_level_index := 0
+var current_level_snapshot: Dictionary = {}
+var total_moves_at_floor_start := 0
 
 var loading_layer: CanvasLayer
 var loading_root: Control
@@ -60,7 +66,8 @@ func _ready() -> void:
 	get_viewport().size_changed.connect(_on_viewport_size_changed)
 	_create_mobile_controls()
 	_create_loading_overlay()
-	_begin_generate_floor(1)
+	_connect_hud_buttons()
+	_start_selected_mode()
 
 
 func _process(delta: float) -> void:
@@ -142,6 +149,7 @@ func _begin_generate_floor(floor_number: int) -> void:
 	pending_floor_number = floor_number
 	is_generating_floor = true
 	_set_mobile_controls_enabled(false)
+	_set_restart_enabled(false)
 	_show_loading_overlay("正在生成第 %d 层..." % floor_number)
 
 	generation_thread = Thread.new()
@@ -153,6 +161,43 @@ func _begin_generate_floor(floor_number: int) -> void:
 		var result: Dictionary = _generate_floor_thread(floor_number)
 		is_generating_floor = false
 		_finish_generation_result(result)
+
+
+func _start_selected_mode() -> void:
+	total_moves = 0
+	floor_moves = 0
+	current_floor = 0
+	total_moves_at_floor_start = 0
+	current_level_snapshot.clear()
+
+	if GameConfig.game_mode == GameConfig.GAME_MODE_TUTORIAL:
+		_start_tutorial()
+	else:
+		_begin_generate_floor(1)
+
+
+func _start_tutorial() -> void:
+	tutorial_levels = TutorialLevelsData.get_levels()
+	tutorial_level_index = 0
+
+	if tutorial_levels.is_empty():
+		push_error("No tutorial levels configured.")
+		return
+
+	_apply_tutorial_floor(tutorial_level_index)
+
+
+func _apply_tutorial_floor(index: int) -> void:
+	if index < 0 or index >= tutorial_levels.size():
+		get_tree().change_scene_to_file("res://scenes/home.tscn")
+		return
+
+	is_generating_floor = false
+	_hide_loading_overlay()
+	_set_mobile_controls_enabled(true)
+	block_floor_advance_until_player_leaves_exit = false
+
+	_apply_generated_floor(index + 1, tutorial_levels[index])
 
 
 func _generate_floor_thread(floor_number: int) -> Dictionary:
@@ -201,6 +246,7 @@ func _finish_generation_result(result: Dictionary) -> void:
 		_apply_generated_floor(int(result["floor_number"]), result["level"])
 		_hide_loading_overlay()
 		_set_mobile_controls_enabled(true)
+		_set_restart_enabled(true)
 		block_floor_advance_until_player_leaves_exit = false
 		return
 
@@ -208,38 +254,48 @@ func _finish_generation_result(result: Dictionary) -> void:
 
 	if has_active_floor:
 		_set_mobile_controls_enabled(true)
+		_set_restart_enabled(has_active_floor)
 		block_floor_advance_until_player_leaves_exit = true
 		push_warning("下一层生成失败，保留当前层。")
 		_update_hud()
 		return
 
 	_set_mobile_controls_enabled(false)
+	_set_restart_enabled(false)
 	push_error("初始楼层生成失败。请降低难度参数或增加生成尝试次数。")
 
 
-func _apply_generated_floor(floor_number: int, level: Dictionary) -> void:
+func _apply_generated_floor(floor_number: int, level: Dictionary, update_restart_snapshot := true) -> void:
+	var working_level := _duplicate_level_data(level)
+
+	if update_restart_snapshot:
+		current_level_snapshot = _duplicate_level_data(working_level)
+		total_moves_at_floor_start = total_moves
+
 	_clear_floor_entities()
 	current_floor = floor_number
-	grid_size = int(level["grid_size"])
-	floor_cells.assign(level["floor_cells"])
-	wall_cells.assign(level["walls"])
-	key_cells = level["keys"]
-	door_cells = level["doors"]
-	portal_cells = level["portals"]
-	rail_cells = level.get("rails", {})
-	rail_lever_cells = level.get("rail_levers", {})
+	grid_size = int(working_level["grid_size"])
+	floor_cells.assign(working_level["floor_cells"])
+	wall_cells.assign(working_level["walls"])
+	key_cells = working_level["keys"]
+	door_cells = working_level["doors"]
+	portal_cells = working_level["portals"]
+	rail_cells = working_level.get("rails", {})
+	rail_lever_cells = working_level.get("rail_levers", {})
 	rail_states = _make_initial_rail_states(rail_cells)
 	rail_blocked_cells = _make_rail_blocked_cells(rail_cells)
-	optimal_steps = int(level["optimal_steps"])
+	optimal_steps = int(working_level["optimal_steps"])
 
 	_update_board_layout()
 
-	player.set_cell(level["start"])
+	player.set_cell(working_level["start"])
 	player.clear_keys()
-	stairs.set_cell(level["exit"])
+	stairs.set_cell(working_level["exit"])
 
 	floor_moves = 0
 	has_active_floor = true
+	block_floor_advance_until_player_leaves_exit = false
+	_set_restart_enabled(true)
 	_spawn_floor_entities()
 
 	_update_hud()
@@ -303,8 +359,52 @@ func _try_advance_floor_if_on_exit() -> bool:
 	if block_floor_advance_until_player_leaves_exit:
 		return false
 
-	_begin_generate_floor(current_floor + 1)
+	if GameConfig.game_mode == GameConfig.GAME_MODE_TUTORIAL:
+		tutorial_level_index += 1
+
+		if tutorial_level_index >= tutorial_levels.size():
+			get_tree().change_scene_to_file("res://scenes/home.tscn")
+		else:
+			_apply_tutorial_floor(tutorial_level_index)
+	else:
+		_begin_generate_floor(current_floor + 1)
+
 	return true
+
+
+func _connect_hud_buttons() -> void:
+	if hud == null:
+		return
+
+	if hud.has_signal("home_requested"):
+		hud.home_requested.connect(_on_home_requested)
+
+	if hud.has_signal("restart_requested"):
+		hud.restart_requested.connect(_on_restart_requested)
+
+
+func _on_home_requested() -> void:
+	get_tree().change_scene_to_file("res://scenes/home.tscn")
+
+
+func _on_restart_requested() -> void:
+	if is_generating_floor or current_level_snapshot.is_empty():
+		return
+
+	total_moves = total_moves_at_floor_start
+	_apply_generated_floor(current_floor, current_level_snapshot, false)
+
+
+func _duplicate_level_data(level: Dictionary) -> Dictionary:
+	return level.duplicate(true)
+
+
+func _set_restart_enabled(enabled: bool) -> void:
+	if hud == null:
+		return
+
+	if hud.has_method("set_restart_enabled"):
+		hud.set_restart_enabled(enabled)
 
 
 func _draw() -> void:
@@ -474,6 +574,15 @@ func _get_rail_paths(rail_data: Dictionary) -> Array:
 	return result
 
 
+func _get_rail_switch_cell(rail_data: Dictionary) -> Vector2i:
+	var raw_switch_cell = rail_data.get("switch_cell", Vector2i(-1, -1))
+
+	if raw_switch_cell is Vector2i:
+		return raw_switch_cell
+
+	return Vector2i(-1, -1)
+
+
 func _get_rail_connections(rail_data: Dictionary, port_count: int) -> Array:
 	var result: Array = []
 	var raw_connections: Array = rail_data.get("connections", [])
@@ -561,9 +670,10 @@ func _spawn_rail_entities() -> void:
 		var connections: Array = _get_rail_connections(rail_data, ports.size())
 		var state: int = int(rail_states.get(str(rail_id), int(rail_data.get("state", 0))))
 		var color_name: String = str(rail_data.get("color", "cyan"))
+		var switch_cell: Vector2i = _get_rail_switch_cell(rail_data)
 		var rail = RailScript.new()
 		rails.add_child(rail)
-		rail.set_rail_data(str(rail_id), ports, connections, state, color_name, paths)
+		rail.set_rail_data(str(rail_id), ports, connections, state, color_name, paths, switch_cell)
 
 	for lever_cell in rail_lever_cells.keys():
 		var lever_data: Dictionary = rail_lever_cells[lever_cell]

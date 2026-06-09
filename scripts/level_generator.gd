@@ -1,3 +1,4 @@
+
 class_name LevelGenerator
 extends RefCounted
 
@@ -969,6 +970,7 @@ func _build_entities(
 			"id": str(rail_id),
 			"ports": rail_data.get("ports", []),
 			"paths": rail_data.get("paths", []),
+			"switch_cell": rail_data.get("switch_cell", INVALID_CELL),
 			"connections": rail_data.get("connections", []),
 			"state": int(rail_data.get("state", 0)),
 			"color": str(rail_data.get("color", "cyan"))
@@ -1251,6 +1253,7 @@ func _add_rail_mechanics(
 		)
 		var ports: Array[Vector2i] = _normalize_rail_ports(rail_layout.get("ports", []))
 		var paths: Array = _normalize_rail_paths(rail_layout.get("paths", []))
+		var switch_cell: Vector2i = rail_layout.get("switch_cell", INVALID_CELL)
 
 		if ports.size() < min_port_count:
 			break
@@ -1267,14 +1270,16 @@ func _add_rail_mechanics(
 			for path_index in range(1, path.size() - 1):
 				occupied[path[path_index]] = true
 
+		var rail_connections := _make_branch_rail_connections()
 		var rail_id: String = "rail_%d" % rails.size()
 		rails[rail_id] = {
 			"id": rail_id,
 			"ports": ports,
-			# 多口中央变轨器没有出入口方向；paths 只表示不可通行的轨道路。
+			# 结构为：主轨两端端口 + 主轨中段 switch_cell + 从 switch_cell 向外延伸的分支端口。
 			"paths": paths,
-			"connections": _make_clockwise_rail_connections(ports.size()),
-			"state": rng.randi_range(0, ports.size() - 1),
+			"switch_cell": switch_cell,
+			"connections": rail_connections,
+			"state": rng.randi_range(0, rail_connections.size() - 1),
 			"color": _pick_color_name(),
 			"min_length": min_length
 		}
@@ -1308,14 +1313,22 @@ func _take_random_rail_switch_layout(
 	occupied: Dictionary,
 	adjacency: Dictionary,
 	min_port_count: int,
-	max_port_count: int,
+	_max_port_count: int,
 	min_length: int
 ) -> Dictionary:
 	var candidates := free_cells.duplicate()
 	var safe_min_port_count := maxi(3, min_port_count)
-	var safe_max_port_count := maxi(safe_min_port_count, max_port_count)
-	# 端口之间至少隔 1 格轨道路，所以基础路径长度要比端口数量更长。
-	var safe_min_path_size := maxi(safe_min_port_count * 2 - 1, min_length + 1)
+
+	# 这套轨道固定生成 3 个端口：主轨入口、主轨出口、分支出口。
+	# 变轨点 switch_cell 是主轨的内部格，绝不会作为端口。
+	if safe_min_port_count > 3:
+		return {
+			"ports": [],
+			"paths": [],
+			"switch_cell": INVALID_CELL
+		}
+
+	var safe_main_path_size := maxi(5, min_length + 1)
 
 	while not candidates.is_empty():
 		var start_index := rng.randi_range(0, candidates.size() - 1)
@@ -1325,47 +1338,59 @@ func _take_random_rail_switch_layout(
 		if occupied.has(start_cell):
 			continue
 
-		var path := _make_random_simple_path(start_cell, occupied, adjacency, safe_min_path_size)
+		var main_path := _make_random_simple_path(start_cell, occupied, adjacency, safe_main_path_size)
 
-		if path.size() < safe_min_path_size:
+		if main_path.size() < safe_main_path_size:
 			continue
 
-		var port_count := rng.randi_range(safe_min_port_count, mini(safe_max_port_count, int((path.size() + 1) / 2)))
-		var port_indices := _sample_non_adjacent_rail_port_indices(path, port_count)
+		var branch_indices := _make_shuffled_middle_indices(main_path.size())
 
-		if port_indices.size() < safe_min_port_count:
-			continue
+		for branch_index in branch_indices:
+			var switch_cell: Vector2i = main_path[branch_index]
+			var branch_path := _make_random_rail_branch_path(
+				switch_cell,
+				main_path,
+				occupied,
+				adjacency,
+				3
+			)
 
-		var ports := _make_rail_ports_from_indices(path, port_indices)
-
-		if _has_adjacent_cells(ports):
-			continue
-
-		var paths := _make_rail_track_segments(path, port_indices)
-
-		if paths.is_empty():
-			continue
-
-		for port in ports:
-			free_cells.erase(port)
-
-		for raw_track_path in paths:
-			if not (raw_track_path is Array):
+			if branch_path.size() < 2:
 				continue
 
-			var track_path: Array = raw_track_path
+			var ports: Array[Vector2i] = [
+				main_path[0],
+				main_path[main_path.size() - 1],
+				branch_path[branch_path.size() - 1]
+			]
 
-			for track_cell in track_path:
-				free_cells.erase(track_cell)
+			if _has_adjacent_cells(ports):
+				continue
 
-		return {
-			"ports": ports,
-			"paths": paths
-		}
+			var paths: Array = [main_path, branch_path]
+
+			for port in ports:
+				free_cells.erase(port)
+
+			for raw_track_path in paths:
+				if not (raw_track_path is Array):
+					continue
+
+				var track_path: Array = raw_track_path
+
+				for track_cell in track_path:
+					free_cells.erase(track_cell)
+
+			return {
+				"ports": ports,
+				"paths": paths,
+				"switch_cell": switch_cell
+			}
 
 	return {
 		"ports": [],
-		"paths": []
+		"paths": [],
+		"switch_cell": INVALID_CELL
 	}
 
 
@@ -1404,6 +1429,81 @@ func _make_random_simple_path(
 		visited[next_cell] = true
 
 	return path
+
+
+func _make_random_rail_branch_path(
+	switch_cell: Vector2i,
+	main_path: Array[Vector2i],
+	occupied: Dictionary,
+	adjacency: Dictionary,
+	target_size: int
+) -> Array[Vector2i]:
+	var main_path_set := _make_set(main_path)
+	var first_step_candidates: Array[Vector2i] = []
+	var neighbors: Array = adjacency.get(switch_cell, [])
+
+	for raw_neighbor in neighbors:
+		if not (raw_neighbor is Vector2i):
+			continue
+
+		var neighbor: Vector2i = raw_neighbor
+
+		# 分支必须从主轨的中间点向外长出去，不能沿主轨继续伸展。
+		if main_path_set.has(neighbor) or occupied.has(neighbor):
+			continue
+
+		first_step_candidates.append(neighbor)
+
+	while not first_step_candidates.is_empty():
+		var first_index := rng.randi_range(0, first_step_candidates.size() - 1)
+		var first_step: Vector2i = first_step_candidates[first_index]
+		first_step_candidates.remove_at(first_index)
+
+		var path: Array[Vector2i] = [switch_cell, first_step]
+		var visited := main_path_set.duplicate()
+		visited[first_step] = true
+
+		while path.size() < target_size:
+			var current_cell: Vector2i = path[path.size() - 1]
+			var next_candidates: Array[Vector2i] = []
+
+			for raw_next in adjacency.get(current_cell, []):
+				if not (raw_next is Vector2i):
+					continue
+
+				var candidate_cell: Vector2i = raw_next
+
+				if occupied.has(candidate_cell) or visited.has(candidate_cell):
+					continue
+
+				next_candidates.append(candidate_cell)
+
+			if next_candidates.is_empty():
+				break
+
+			var chosen_next_cell: Vector2i = next_candidates[rng.randi_range(0, next_candidates.size() - 1)]
+			path.append(chosen_next_cell)
+			visited[chosen_next_cell] = true
+
+		if path.size() >= 2:
+			return path
+
+	return []
+
+
+func _make_shuffled_middle_indices(path_size: int) -> Array[int]:
+	var result: Array[int] = []
+
+	for index in range(1, path_size - 1):
+		result.append(index)
+
+	for i in range(result.size() - 1, 0, -1):
+		var j := rng.randi_range(0, i)
+		var tmp: int = result[i]
+		result[i] = result[j]
+		result[j] = tmp
+
+	return result
 
 
 func _sample_non_adjacent_rail_port_indices(path: Array[Vector2i], port_count: int) -> Array[int]:
@@ -2002,6 +2102,16 @@ func _normalize_rail_connections(raw_connections: Array, port_count: int) -> Arr
 		result.append([a, b])
 
 	return result
+
+
+func _make_branch_rail_connections() -> Array:
+	# ports[0] 和 ports[1] 是主轨两端；ports[2] 是从 switch_cell 向外延伸的分支端。
+	# 杠杆循环：主轨直通 -> 左端转分支 -> 右端转分支。
+	return [
+		[0, 1],
+		[0, 2],
+		[1, 2]
+	]
 
 
 func _make_clockwise_rail_connections(port_count: int) -> Array:

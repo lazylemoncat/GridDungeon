@@ -1,0 +1,5 @@
+key:red,floor,wall,floor,floor
+floor,floor,wall,floor,floor
+floor,floor,door:red,floor,exit
+floor,floor,wall,floor,floor
+start,floor,wall,floor,floor

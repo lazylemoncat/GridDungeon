@@ -1,5 +1,8 @@
 extends Node
 
+const GAME_MODE_NORMAL := "normal"
+const GAME_MODE_TUTORIAL := "tutorial"
+
 const MIN_GRID_SIZE := 9
 const MAX_GRID_SIZE := 18
 
@@ -17,6 +20,7 @@ const BOARD_MARGIN_BOTTOM := 32.0
 # 运行时布局结果。所有棋盘实体都应该读取这两个值，而不是写死 56 / Vector2(180, 120)。
 var cell_size := BASE_CELL_SIZE
 var board_offset := Vector2(180, 120)
+var game_mode := GAME_MODE_NORMAL
 
 const KEY_COLOR_NAMES := ["red", "blue", "green", "yellow", "purple", "orange", "cyan", "pink", "white"]
 

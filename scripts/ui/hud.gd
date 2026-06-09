@@ -1,6 +1,16 @@
 extends CanvasLayer
 
+signal home_requested
+signal restart_requested
+
 @onready var stats_label: Label = $StatsLabel
+@onready var return_home_button: Button = $TopRightControls/ReturnHomeButton
+@onready var restart_button: Button = $TopRightControls/RestartButton
+
+
+func _ready() -> void:
+	return_home_button.pressed.connect(_on_return_home_pressed)
+	restart_button.pressed.connect(_on_restart_pressed)
 
 
 func set_stats(
@@ -20,3 +30,15 @@ func set_stats(
 		key_text,
 		optimal_steps
 	]
+
+
+func set_restart_enabled(enabled: bool) -> void:
+	restart_button.disabled = not enabled
+
+
+func _on_return_home_pressed() -> void:
+	home_requested.emit()
+
+
+func _on_restart_pressed() -> void:
+	restart_requested.emit()
